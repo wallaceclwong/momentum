@@ -43,6 +43,10 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from backend.etrade.auth import renew_token, get_oauth_session, SANDBOX
+from backend.notify.telegram import (
+    notify_rebalance_complete, notify_token_expired,
+    notify_error, notify_startup, send
+)
 from backend.etrade.account import get_portfolio, get_balance, parse_positions
 from backend.etrade.trader import compute_rebalance_trades, execute_rebalance
 from backend.engine.paper_trading import record_rebalance
@@ -101,6 +105,7 @@ def job_renew_token():
     else:
         logger.warning("[TOKEN] Renewal failed - manual re-authentication may be needed")
         logger.warning("  Run: python etrade_step1_get_url.py  then  python etrade_step2_verify.py <CODE>")
+        notify_token_expired()
 
 
 def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
@@ -118,6 +123,7 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
     # Ensure token is valid
     if not renew_token():
         logger.error("[ERROR] Cannot rebalance - token expired. Re-authenticate first.")
+        notify_token_expired()
         return
 
     # Get target portfolio
@@ -127,6 +133,7 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         logger.info(f"[SCREENER] {len(target_weights)} target positions")
     except Exception as e:
         logger.error(f"[ERROR] Screener failed: {e}")
+        notify_error("Screener", str(e))
         return
 
     # Get current positions
@@ -140,6 +147,7 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         portfolio_value = total_val if total_val > 0 else VIRTUAL_CAPITAL
     except Exception as e:
         logger.error(f"[ERROR] Failed to fetch account state: {e}")
+        notify_error("Account fetch", str(e))
         return
 
     # Compute trades
@@ -162,6 +170,8 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
 
     for err in results["errors"]:
         logger.error(f"  {err['action']} {err['ticker']}: {err['error']}")
+
+    notify_rebalance_complete(placed, errors, portfolio_value, buys, sells, dry_run)
 
     # Record trades to local portfolio tracker (paper or live)
     try:
@@ -213,6 +223,7 @@ if __name__ == "__main__":
     logger.info(f"  Log file      : {LOG_PATH.resolve()}")
     logger.info(f"  Mode          : {'DRY RUN' if args.dry_run else 'LIVE ORDERS'}")
     logger.info(f"{'='*60}")
+    notify_startup(env_label)
 
     try:
         scheduler.start()
