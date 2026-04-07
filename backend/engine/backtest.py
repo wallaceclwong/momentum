@@ -310,19 +310,24 @@ def run_backtest(
                         deployment = REGIME_BEAR_DEPLOYMENT
                         logger.info(f"  BEAR regime — deploying {deployment:.0%}")
 
-            # ── Build per-ticker DataFrames for momentum engine ───────────
-            ticker_dfs: Dict[str, pd.DataFrame] = {
-                col: prices_to_date[[col]].rename(columns={col: "Close"}).dropna()
-                for col in prices_to_date.columns
-                if not prices_to_date[[col]].dropna().empty
-            }
+            # ── Point-in-time constituents (survivorship bias fix) ───────
+            from ..data.sp500 import get_tickers_by_sector as _gts
+            pit_sector_to_tickers = _gts(as_of=trade_date.to_pydatetime())
+
+            # ── Build per-ticker DataFrames — min 252 days history filter ─
+            MIN_HISTORY = 252
+            ticker_dfs: Dict[str, pd.DataFrame] = {}
+            for col in prices_to_date.columns:
+                series = prices_to_date[col].dropna()
+                if len(series) >= MIN_HISTORY:
+                    ticker_dfs[col] = series.to_frame(name="Close")
 
             from ..engine.momentum import calculate_momentum_for_tickers as _calc
             momentum_data = _calc(ticker_dfs)
 
             # ── Select top 3 per sector ───────────────────────────────────
             new_holdings: Dict[str, float] = {}
-            for sector, tickers in sector_to_tickers.items():
+            for sector, tickers in pit_sector_to_tickers.items():
                 scores = [
                     (t, momentum_data[t]["composite_score"])
                     for t in tickers
