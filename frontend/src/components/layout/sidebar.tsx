@@ -10,7 +10,8 @@ import {
   Briefcase, 
   PieChart, 
   Activity,
-  FlaskConical
+  FlaskConical,
+  LineChart
 } from "lucide-react";
 
 const navigation = [
@@ -19,6 +20,7 @@ const navigation = [
   { name: "Portfolio", href: "/portfolio", icon: Briefcase },
   { name: "Sectors", href: "/sectors", icon: PieChart },
   { name: "Backtest", href: "/backtest", icon: FlaskConical },
+  { name: "Portfolio Tracker", href: "/paper", icon: LineChart },
 ];
 
 export default function Sidebar() {

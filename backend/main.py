@@ -10,6 +10,7 @@ from backend.api.routes_screener import router as screener_router
 from backend.api.routes_portfolio import router as portfolio_router
 from backend.api.routes_sectors import router as sectors_router
 from backend.api.routes_backtest import router as backtest_router
+from backend.api.routes_paper import router as paper_router
 
 # Setup logging
 logging.basicConfig(
@@ -39,6 +40,7 @@ app.include_router(screener_router, prefix="/api/screener", tags=["screener"])
 app.include_router(portfolio_router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(sectors_router, prefix="/api/sectors", tags=["sectors"])
 app.include_router(backtest_router, prefix="/api/backtest", tags=["backtest"])
+app.include_router(paper_router, prefix="/api/paper", tags=["paper"])
 
 
 @app.on_event("startup")

@@ -45,6 +45,7 @@ from apscheduler.triggers.cron import CronTrigger
 from backend.etrade.auth import renew_token, get_oauth_session, SANDBOX
 from backend.etrade.account import get_portfolio, get_balance, parse_positions
 from backend.etrade.trader import compute_rebalance_trades, execute_rebalance
+from backend.engine.paper_trading import record_rebalance
 from backend.data.sp500 import get_ticker_to_sector, get_tickers_by_sector
 from backend.engine.portfolio import get_sector_etf_weights
 from backend.engine.momentum import calculate_momentum_for_tickers
@@ -161,6 +162,15 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
 
     for err in results["errors"]:
         logger.error(f"  {err['action']} {err['ticker']}: {err['error']}")
+
+    # Record trades to local portfolio tracker (paper or live)
+    try:
+        from backend.data.sp500 import get_ticker_to_sector
+        ticker_to_sector = get_ticker_to_sector()
+        rid = record_rebalance(target_weights, ticker_to_sector, capital=VIRTUAL_CAPITAL)
+        logger.info(f"[TRACKER] Portfolio tracker updated: {rid}")
+    except Exception as e:
+        logger.error(f"[TRACKER] Failed to update portfolio tracker: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────

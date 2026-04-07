@@ -101,6 +101,39 @@ class SectorCorrelation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class PaperPosition(Base):
+    """Current open positions in the paper (or live) portfolio."""
+    __tablename__ = "paper_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String(10), nullable=False, unique=True, index=True)
+    sector = Column(String(100))
+    shares = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    entry_date = Column(DateTime(timezone=True), nullable=False)
+    target_weight = Column(Float)
+    trading_mode = Column(String(10), default="paper")  # paper | live
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class PaperTrade(Base):
+    """Historical trade log for paper (or live) portfolio."""
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trade_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    action = Column(String(4), nullable=False)   # BUY | SELL
+    ticker = Column(String(10), nullable=False, index=True)
+    sector = Column(String(100))
+    shares = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    total_value = Column(Float, nullable=False)
+    rebalance_id = Column(String(36))            # groups all trades from one rebalance
+    trading_mode = Column(String(10), default="paper")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class BacktestResult(Base):
     """Model for storing backtest results."""
     __tablename__ = "backtest_results"
