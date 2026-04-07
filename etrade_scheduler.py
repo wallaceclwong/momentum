@@ -50,13 +50,15 @@ from backend.notify.telegram import (
 from backend.etrade.account import get_portfolio, get_balance, parse_positions
 from backend.etrade.trader import compute_rebalance_trades, execute_rebalance
 from backend.engine.paper_trading import record_rebalance
+from backend.engine.regime import get_regime
 from backend.data.sp500 import get_ticker_to_sector, get_tickers_by_sector
 from backend.engine.portfolio import get_sector_etf_weights
 from backend.engine.momentum import calculate_momentum_for_tickers
 from backend.data.prices import fetch_price_history
 
-ACCOUNT_ID_KEY = "dBZOKt9xDrtRSAOl4MSiiA"  # Brokerage MARGIN
-VIRTUAL_CAPITAL = 100_000.0                  # Portfolio size for simulation
+ACCOUNT_ID_KEY   = "dBZOKt9xDrtRSAOl4MSiiA"  # Brokerage MARGIN
+VIRTUAL_CAPITAL  = 100_000.0                  # Portfolio size for simulation
+_PEAK_NAV        = VIRTUAL_CAPITAL            # tracks peak for circuit breaker
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -68,14 +70,15 @@ def is_last_friday_of_month(d: date = None) -> bool:
     return (d + timedelta(days=7)).month != d.month
 
 
-def get_target_weights() -> dict:
+def get_target_weights(deployment: float = 1.0) -> dict:
     """Run screener and return target weight dict {ticker: weight}."""
+    from backend.config import USE_VOLATILITY_WEIGHTING
     ticker_to_sector = get_ticker_to_sector()
     sector_to_tickers = get_tickers_by_sector()
     sector_weights = get_sector_etf_weights()
     all_tickers = list(ticker_to_sector.keys())
 
-    price_data = fetch_price_history(all_tickers, period="6mo", interval="1d")
+    price_data = fetch_price_history(all_tickers, period="13mo", interval="1d")
     momentum_data = calculate_momentum_for_tickers(price_data)
 
     target = {}
@@ -87,11 +90,22 @@ def get_target_weights() -> dict:
         ]
         scores.sort(key=lambda x: x[1], reverse=True)
         top3 = [t for t, _ in scores[:3]]
-        sw = sector_weights.get(sector, 0.0)
-        if top3 and sw > 0:
-            w = sw / len(top3)
-            for t in top3:
-                target[t] = w
+        sw = sector_weights.get(sector, 0.0) * deployment
+        if not top3 or sw <= 0:
+            continue
+
+        if USE_VOLATILITY_WEIGHTING:
+            vols = [momentum_data[t].get("volatility") for t in top3]
+            if all(v is not None and v > 0 for v in vols):
+                inv_vols = [1.0 / v for v in vols]
+                total_inv = sum(inv_vols)
+                for t, iv in zip(top3, inv_vols):
+                    target[t] = sw * (iv / total_inv)
+                continue
+
+        w = sw / len(top3)
+        for t in top3:
+            target[t] = w
     return target
 
 
@@ -120,6 +134,38 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
     logger.info(f"[REBALANCE DAY] {today}  |  {'DRY RUN' if dry_run else 'LIVE'}")
     logger.info(f"{'='*60}")
 
+    # ── Regime filter ──────────────────────────────────────────────
+    regime = get_regime()
+    logger.info(f"[REGIME] {regime['label']}  SPY={regime['spy_price']}  MA200={regime['spy_ma200']}  deploy={regime['deployment']:.0%}")
+    send(f"*Regime check:* {regime['label']} market\nSPY: ${regime['spy_price']} vs MA200: ${regime['spy_ma200']}\nDeployment: {regime['deployment']:.0%}")
+
+    # ── Circuit breaker ───────────────────────────────────────────
+    global _PEAK_NAV
+    from backend.db import SessionLocal, PaperPosition
+    try:
+        db = SessionLocal()
+        positions = db.query(PaperPosition).all()
+        db.close()
+        import yfinance as yf
+        if positions:
+            tickers = [p.ticker for p in positions]
+            raw = yf.download(tickers, period="2d", interval="1d", progress=False, auto_adjust=True)
+            current_val = sum(
+                p.shares * float(raw["Close"][p.ticker].dropna().iloc[-1])
+                for p in positions if p.ticker in raw["Close"].columns
+            )
+            if current_val > _PEAK_NAV:
+                _PEAK_NAV = current_val
+            from backend.config import CIRCUIT_BREAKER_THRESHOLD
+            if current_val < _PEAK_NAV * CIRCUIT_BREAKER_THRESHOLD:
+                drawdown = (1 - current_val / _PEAK_NAV) * 100
+                msg = f"*Circuit Breaker Triggered*\nPortfolio down {drawdown:.1f}% from peak\nSkipping rebalance to protect capital"
+                logger.warning(f"[CIRCUIT BREAKER] {drawdown:.1f}% drawdown from peak — skipping")
+                send(msg)
+                return
+    except Exception as e:
+        logger.warning(f"[CIRCUIT BREAKER] Could not check: {e}")
+
     # Ensure token is valid
     if not renew_token():
         logger.error("[ERROR] Cannot rebalance - token expired. Re-authenticate first.")
@@ -129,8 +175,8 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
     # Get target portfolio
     logger.info("[SCREENER] Running momentum screener...")
     try:
-        target_weights = get_target_weights()
-        logger.info(f"[SCREENER] {len(target_weights)} target positions")
+        target_weights = get_target_weights(deployment=regime["deployment"])
+        logger.info(f"[SCREENER] {len(target_weights)} target positions  (deploy={regime['deployment']:.0%})")
     except Exception as e:
         logger.error(f"[ERROR] Screener failed: {e}")
         notify_error("Screener", str(e))

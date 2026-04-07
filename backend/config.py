@@ -37,10 +37,30 @@ EARNINGS_LOOKBACK = 2
 YFINANCE_PERIOD = "1y"  # Fetch 1 year of history to cover all windows
 YFINANCE_INTERVAL = "1d"  # Daily data
 
-# Default equal weights for composite momentum score
-# Can be adjusted to emphasize shorter or longer-term momentum
+# Momentum score weights — longer lookback weighted more, plus 52W high proximity
 MOMENTUM_WEIGHTS = {
-    "4W": 1.0,
-    "13W": 1.0,
-    "26W": 1.0,
+    "4W":       0.5,
+    "13W":      1.0,
+    "26W":      1.5,
+    "52W_HIGH": 1.0,
 }
+
+# Skip last month to avoid short-term reversal (standard in academic literature)
+SKIP_LAST_MONTH = True
+SKIP_DAYS = 21
+
+# Volatility-weighted position sizing within each sector
+USE_VOLATILITY_WEIGHTING = True
+VOL_LOOKBACK_DAYS = 20
+
+# Market regime filter: reduce exposure when SPY < 200-day MA
+USE_REGIME_FILTER = True
+REGIME_MA_DAYS = 200
+REGIME_BEAR_DEPLOYMENT = 0.5
+
+# Drawdown circuit breaker: skip rebalance if portfolio down >15% from peak
+CIRCUIT_BREAKER_THRESHOLD = 0.85
+
+# Backtest transaction costs
+BACKTEST_SLIPPAGE = 0.0005
+BACKTEST_COMMISSION_PER_SHARE = 0.005

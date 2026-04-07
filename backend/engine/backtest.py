@@ -14,6 +14,11 @@ from ..engine.momentum import calculate_momentum_for_tickers
 from ..engine.portfolio import get_sector_etf_weights
 from .benchmark import fetch_all_benchmarks, align_benchmarks_with_portfolio
 from .metrics import calculate_all_metrics, prepare_nav_series
+from ..config import (
+    USE_REGIME_FILTER, REGIME_MA_DAYS, REGIME_BEAR_DEPLOYMENT,
+    USE_VOLATILITY_WEIGHTING,
+    BACKTEST_SLIPPAGE, BACKTEST_COMMISSION_PER_SHARE
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,10 +269,12 @@ def run_backtest(
     sector_to_tickers = get_tickers_by_sector()
     sector_weights = get_sector_etf_weights()
     all_tickers = list(ticker_to_sector.keys())
+    # Include SPY for regime filter (not in S&P 500 member list)
+    download_tickers = list(set(all_tickers) | {"SPY"})
 
-    # ── 2. Pre-download ALL prices once (bulk) ───────────────────────────────
-    logger.info(f"Downloading prices for {len(all_tickers)} tickers ({start_date} – {end_date}) …")
-    all_prices = _download_bulk_prices(all_tickers, start_date, end_date)
+    # ── 2. Pre-download ALL prices once (bulk) ────────────────────────
+    logger.info(f"Downloading prices for {len(download_tickers)} tickers ({start_date} – {end_date}) …")
+    all_prices = _download_bulk_prices(download_tickers, start_date, end_date)
     if all_prices.empty:
         raise RuntimeError("Price download returned empty data")
     logger.info(f"Downloaded prices shape: {all_prices.shape}")
@@ -289,10 +296,21 @@ def run_backtest(
 
         if is_rebalance:
             logger.info(f"Rebalancing on {trade_date.date()}")
-            # Slice prices up to (but not including) trade_date → no lookahead
             prices_to_date: pd.DataFrame = all_prices.loc[:trade_date]
 
-            # Build per-ticker DataFrames for momentum engine
+            # ── Regime filter ─────────────────────────────────────────────
+            deployment = 1.0
+            if USE_REGIME_FILTER:
+                spy_series = prices_to_date["SPY"] if "SPY" in prices_to_date.columns else None
+                if spy_series is not None and len(spy_series.dropna()) >= REGIME_MA_DAYS:
+                    spy_clean = spy_series.dropna()
+                    spy_now = float(spy_clean.iloc[-1])
+                    spy_ma  = float(spy_clean.iloc[-REGIME_MA_DAYS:].mean())
+                    if spy_now < spy_ma:
+                        deployment = REGIME_BEAR_DEPLOYMENT
+                        logger.info(f"  BEAR regime — deploying {deployment:.0%}")
+
+            # ── Build per-ticker DataFrames for momentum engine ───────────
             ticker_dfs: Dict[str, pd.DataFrame] = {
                 col: prices_to_date[[col]].rename(columns={col: "Close"}).dropna()
                 for col in prices_to_date.columns
@@ -302,6 +320,7 @@ def run_backtest(
             from ..engine.momentum import calculate_momentum_for_tickers as _calc
             momentum_data = _calc(ticker_dfs)
 
+            # ── Select top 3 per sector ───────────────────────────────────
             new_holdings: Dict[str, float] = {}
             for sector, tickers in sector_to_tickers.items():
                 scores = [
@@ -311,11 +330,36 @@ def run_backtest(
                 ]
                 scores.sort(key=lambda x: x[1], reverse=True)
                 top3 = [t for t, _ in scores[:3]]
-                sw = sector_weights.get(sector, 0.0)
-                if top3 and sw > 0:
-                    w = sw / len(top3)
-                    for t in top3:
-                        new_holdings[t] = w
+                sw = sector_weights.get(sector, 0.0) * deployment
+                if not top3 or sw <= 0:
+                    continue
+
+                # ── Volatility-weighted sizing within sector ──────────────
+                if USE_VOLATILITY_WEIGHTING:
+                    vols = [momentum_data[t].get("volatility") for t in top3]
+                    if all(v is not None and v > 0 for v in vols):
+                        inv_vols = [1.0 / v for v in vols]
+                        total_inv = sum(inv_vols)
+                        for t, iv in zip(top3, inv_vols):
+                            new_holdings[t] = sw * (iv / total_inv)
+                        continue
+
+                # Fallback: equal weight within sector
+                w = sw / len(top3)
+                for t in top3:
+                    new_holdings[t] = w
+
+            # ── Transaction costs ────────────────────────────────────────
+            rebalance_cost = 0.0
+            for t, new_w in new_holdings.items():
+                old_w = current_holdings.get(t, 0.0)
+                trade_value = abs(new_w - old_w) * nav
+                price_t = prices_to_date[t].dropna().iloc[-1] if t in prices_to_date.columns else 100
+                shares_traded = trade_value / price_t if price_t > 0 else 0
+                rebalance_cost += trade_value * BACKTEST_SLIPPAGE
+                rebalance_cost += shares_traded * BACKTEST_COMMISSION_PER_SHARE
+            nav -= rebalance_cost
+
             current_holdings = new_holdings
 
         # Daily return
