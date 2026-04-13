@@ -1,0 +1,50 @@
+# Momentum Strategy — Project Rules for Cascade
+
+## Project
+S&P 500 systematic momentum screener + live trading system.
+Backend: FastAPI (Python). Frontend: Next.js (TypeScript).
+Venv: C:\Users\ASUS\Momentum\.venv\Scripts\
+
+## Runtime
+- Start backend: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+  (run from C:\Users\ASUS\Momentum\sp500-momentum)
+- Frontend: Next.js on port 3000
+
+## Key files
+- backend/config.py               — all strategy parameters (single source of truth)
+- backend/engine/momentum.py      — composite score calculation
+- backend/engine/backtest.py      — full backtesting loop
+- backend/engine/regime.py        — 5-state VIX+MA market regime filter
+- backend/engine/portfolio.py     — risk-parity sector weighting
+- backend/engine/crash_protection.py — Barroso & Santa-Clara 2015 vol-scaling
+- ibkr_scheduler.py               — live IBKR rebalance + stop-loss scheduler
+- etrade_scheduler.py             — live E*Trade rebalance + stop-loss scheduler
+
+## Strategy overview
+- Universe: S&P 500 (point-in-time constituents, survivorship-bias reduced)
+- Signals: 4W/13W/26W momentum, 52W high proximity, trend R², earnings surprise
+- Normalization: cross-sectional z-score
+- Filters: price >$5, ADV >$1M, history ≥252 days
+- Sizing: risk-parity sector weights → vol-weighted within sector → 5% cap
+- Risk layers: regime filter (5-state) → crash protection → stop-loss (15%) → circuit breaker
+
+## Config flags (backend/config.py)
+- USE_REGIME_FILTER = True
+- USE_RISK_PARITY_SECTORS = True
+- USE_CRASH_PROTECTION = True
+- USE_STOP_LOSS = True  (STOP_LOSS_PCT = 0.15)
+- USE_TAX_AWARE_REBALANCING = False  (HK citizen, no CGT)
+- USE_EARNINGS_IN_SCREENER = True  (live only, not backtest)
+- USE_CROSS_SECTIONAL_ZSCORE = True
+
+## User context
+- HK citizen: zero capital gains tax → monthly rebalancing is optimal
+- Target broker: IBKR (primary), E*Trade (secondary)
+- Dry-run mode active until IBKR_LIVE=true in .env
+
+## Conventions
+- Always import new config values from backend/config.py — never hardcode
+- Backtest uses bulk price download once (no per-date fetches, no lookahead)
+- Regime filter returns dict with keys: label, bullish, spy_price, spy_ma50, spy_ma200, vix, deployment
+- Both schedulers must stay feature-identical (crash protection, stop-loss, regime)
+- Git: commit after each logical feature, push to origin/master
