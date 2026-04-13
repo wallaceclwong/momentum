@@ -72,7 +72,7 @@ def is_last_friday_of_month(d: date = None) -> bool:
 
 def get_target_weights(deployment: float = 1.0) -> dict:
     """Run screener and return target weight dict {ticker: weight}."""
-    from backend.config import USE_VOLATILITY_WEIGHTING
+    from backend.config import USE_VOLATILITY_WEIGHTING, MAX_POSITION_WEIGHT
     ticker_to_sector = get_ticker_to_sector()
     sector_to_tickers = get_tickers_by_sector()
     sector_weights = get_sector_etf_weights()
@@ -106,7 +106,19 @@ def get_target_weights(deployment: float = 1.0) -> dict:
         w = sw / len(top3)
         for t in top3:
             target[t] = w
-    return target
+
+    # Concentration cap: no single position > MAX_POSITION_WEIGHT
+    capped = {t: min(w, MAX_POSITION_WEIGHT) for t, w in target.items()}
+    total_before = sum(target.values())
+    total_after = sum(capped.values())
+    clipped = total_before - total_after
+    if clipped > 1e-6:
+        uncapped = {t: w for t, w in capped.items() if w < MAX_POSITION_WEIGHT}
+        if uncapped:
+            uncapped_total = sum(uncapped.values())
+            for t in uncapped:
+                capped[t] += clipped * (uncapped[t] / uncapped_total)
+    return capped
 
 
 # ── Jobs ──────────────────────────────────────────────────────

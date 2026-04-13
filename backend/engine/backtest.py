@@ -17,7 +17,8 @@ from .metrics import calculate_all_metrics, prepare_nav_series
 from ..config import (
     USE_REGIME_FILTER, REGIME_MA_DAYS, REGIME_BEAR_DEPLOYMENT,
     USE_VOLATILITY_WEIGHTING,
-    BACKTEST_SLIPPAGE, BACKTEST_COMMISSION_PER_SHARE
+    BACKTEST_SLIPPAGE, BACKTEST_COMMISSION_PER_SHARE,
+    MAX_POSITION_WEIGHT,
 )
 
 logger = logging.getLogger(__name__)
@@ -353,6 +354,20 @@ def run_backtest(
                 w = sw / len(top3)
                 for t in top3:
                     new_holdings[t] = w
+
+            # ── Concentration cap: clamp each position to MAX_POSITION_WEIGHT ─
+            capped = {t: min(w, MAX_POSITION_WEIGHT) for t, w in new_holdings.items()}
+            # Redistribute clipped weight proportionally to uncapped positions
+            total_before = sum(new_holdings.values())
+            total_after = sum(capped.values())
+            clipped = total_before - total_after
+            if clipped > 1e-6:
+                uncapped = {t: w for t, w in capped.items() if w < MAX_POSITION_WEIGHT}
+                if uncapped:
+                    uncapped_total = sum(uncapped.values())
+                    for t in uncapped:
+                        capped[t] += clipped * (uncapped[t] / uncapped_total)
+            new_holdings = capped
 
             # ── Transaction costs ────────────────────────────────────────
             rebalance_cost = 0.0
