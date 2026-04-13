@@ -7,7 +7,7 @@ import logging
 from backend.config import (
     MOMENTUM_WINDOWS, MOMENTUM_WEIGHTS,
     SKIP_LAST_MONTH, SKIP_DAYS, VOL_LOOKBACK_DAYS,
-    USE_CROSS_SECTIONAL_ZSCORE, MIN_STOCK_PRICE,
+    USE_CROSS_SECTIONAL_ZSCORE, MIN_STOCK_PRICE, MIN_ADV_USD,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,16 +189,40 @@ def _zscore_normalize_signals(results: Dict[str, Dict]) -> Dict[str, Dict]:
     return results
 
 
+def _calc_adv_usd(df: pd.DataFrame, lookback: int = 20) -> Optional[float]:
+    """
+    Compute 20-day average daily dollar volume (ADV).
+    Returns None if Volume column is missing.
+    """
+    if "Volume" not in df.columns:
+        return None
+    try:
+        closes = df["Close"].dropna()
+        volumes = df["Volume"].dropna()
+        # Align on common index
+        common = closes.index.intersection(volumes.index)
+        if len(common) < lookback:
+            return None
+        adv = float((closes.loc[common] * volumes.loc[common]).iloc[-lookback:].mean())
+        return adv
+    except Exception:
+        return None
+
+
 def calculate_momentum_for_tickers(
     price_data: Dict[str, pd.DataFrame],
-    windows: Dict[str, int] = None
+    windows: Dict[str, int] = None,
+    earnings_data: Optional[Dict[str, List]] = None,
 ) -> Dict[str, Dict]:
     """
     Calculate momentum metrics for multiple tickers.
 
     Args:
-        price_data: Dict of {ticker: price DataFrame}
-        windows: Lookback windows (default from config)
+        price_data:    Dict of {ticker: OHLCV DataFrame}
+        windows:       Lookback windows (default from config)
+        earnings_data: Optional {ticker: [{surprise_pct, ...}]} from
+                       get_earnings_surprises_batch(). When supplied,
+                       L1 surprise is added as a continuous score bonus.
 
     Returns:
         Dict of {ticker: {"returns": {...}, "composite_score": ...}}
@@ -207,23 +231,39 @@ def calculate_momentum_for_tickers(
 
     for ticker, df in price_data.items():
         try:
-            # Quality filter: skip penny stocks
+            # ── Quality filters ────────────────────────────────────────
             latest_price = float(df["Close"].dropna().iloc[-1]) if not df.empty else 0
             if latest_price < MIN_STOCK_PRICE:
                 continue
 
+            adv = _calc_adv_usd(df)
+            if adv is not None and adv < MIN_ADV_USD:
+                logger.debug(f"[FILTER] {ticker} excluded: ADV ${adv:,.0f} < ${MIN_ADV_USD:,.0f}")
+                continue
+
+            # ── Signals ───────────────────────────────────────────────
             returns = calculate_returns(df, windows)
-            trend_quality = calculate_trend_quality(df)
-            returns["TREND_QUALITY"] = trend_quality
+            returns["TREND_QUALITY"] = calculate_trend_quality(df)
+
+            # Earnings surprise as continuous score (L1 surprise %, capped ±30)
+            if earnings_data and ticker in earnings_data:
+                e = earnings_data[ticker]
+                l1 = e[0].get("surprise_pct") if e else None
+                if l1 is not None:
+                    try:
+                        returns["EARNINGS_SCORE"] = float(max(-30, min(30, float(l1))))
+                    except (TypeError, ValueError):
+                        pass
 
             composite = calculate_composite_score(returns)
             volatility = calculate_volatility(df)
 
             results[ticker] = {
-                "returns": returns,
+                "returns":        returns,
                 "composite_score": composite,
-                "volatility": volatility,
-                "latest_price": latest_price,
+                "volatility":      volatility,
+                "latest_price":    latest_price,
+                "adv_usd":         adv,
             }
         except Exception as e:
             logger.warning(f"Failed to calculate momentum for {ticker}: {e}")
@@ -231,7 +271,6 @@ def calculate_momentum_for_tickers(
     # Cross-sectional z-score normalization (recalculates composite after)
     if USE_CROSS_SECTIONAL_ZSCORE and results:
         results = _zscore_normalize_signals(results)
-        # Recompute composite scores from normalized signals
         for ticker in results:
             results[ticker]["composite_score"] = calculate_composite_score(
                 results[ticker]["returns"]

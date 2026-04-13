@@ -72,14 +72,28 @@ def is_last_friday_of_month(d: date = None) -> bool:
 
 def get_target_weights(deployment: float = 1.0) -> dict:
     """Run screener and return target weight dict {ticker: weight}."""
-    from backend.config import USE_VOLATILITY_WEIGHTING, MAX_POSITION_WEIGHT
+    from backend.config import USE_VOLATILITY_WEIGHTING, MAX_POSITION_WEIGHT, USE_EARNINGS_IN_SCREENER, EARNINGS_LOOKBACK
+    from backend.data.earnings import get_earnings_surprises_batch
+    from backend.engine.earnings_filter import filter_by_earnings_momentum
+
     ticker_to_sector = get_ticker_to_sector()
     sector_to_tickers = get_tickers_by_sector()
     sector_weights = get_sector_etf_weights()
     all_tickers = list(ticker_to_sector.keys())
 
     price_data = fetch_price_history(all_tickers, period="13mo", interval="1d")
-    momentum_data = calculate_momentum_for_tickers(price_data)
+
+    # Fetch earnings data once for all tickers (used as continuous score + filter)
+    earnings_data = {}
+    if USE_EARNINGS_IN_SCREENER:
+        logger.info("[SCREENER] Fetching earnings surprise data...")
+        try:
+            earnings_data = get_earnings_surprises_batch(list(price_data.keys()), n=EARNINGS_LOOKBACK)
+            logger.info(f"[SCREENER] Earnings data fetched for {len(earnings_data)} tickers")
+        except Exception as e:
+            logger.warning(f"[SCREENER] Earnings fetch failed, continuing without: {e}")
+
+    momentum_data = calculate_momentum_for_tickers(price_data, earnings_data=earnings_data or None)
 
     target = {}
     for sector, tickers in sector_to_tickers.items():
@@ -89,7 +103,13 @@ def get_target_weights(deployment: float = 1.0) -> dict:
             if t in momentum_data and momentum_data[t].get("composite_score") is not None
         ]
         scores.sort(key=lambda x: x[1], reverse=True)
-        top3 = [t for t, _ in scores[:3]]
+        # Take top 6, apply earnings filter, keep best 3 that pass
+        top6 = [t for t, _ in scores[:6]]
+        if earnings_data:
+            passed = filter_by_earnings_momentum(top6, earnings_data)
+            top3 = passed[:3] if passed else top6[:3]  # fallback if all filtered out
+        else:
+            top3 = top6[:3]
         sw = sector_weights.get(sector, 0.0) * deployment
         if not top3 or sw <= 0:
             continue

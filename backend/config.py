@@ -40,12 +40,17 @@ YFINANCE_INTERVAL = "1d"  # Daily data
 # Momentum score weights — longer lookback weighted more, plus 52W high proximity
 # TREND_QUALITY is R² of log-price vs time: rewards smooth uptrends over volatile spikes
 MOMENTUM_WEIGHTS = {
-    "4W":           0.5,
-    "13W":          1.0,
-    "26W":          1.5,
-    "52W_HIGH":     1.0,
-    "TREND_QUALITY": 1.0,
+    "4W":             0.5,
+    "13W":            1.0,
+    "26W":            1.5,
+    "52W_HIGH":       1.0,
+    "TREND_QUALITY":  1.0,
+    "EARNINGS_SCORE": 0.75,  # L1 EPS surprise %, capped ±30 — only used in live screener
 }
+
+# Whether to fetch and include earnings surprise in live screener runs.
+# Disabled automatically in backtests (no historical EPS data available).
+USE_EARNINGS_IN_SCREENER = True
 
 # Skip last month to avoid short-term reversal (standard in academic literature)
 SKIP_LAST_MONTH = True
@@ -61,8 +66,9 @@ USE_VOLATILITY_WEIGHTING = True
 VOL_LOOKBACK_DAYS = 20
 
 # Quality filters — exclude illiquid / penny stocks
-MIN_STOCK_PRICE = 5.0        # must be above $5 to qualify
-MIN_HISTORY_DAYS = 252       # at least 1 year of price history
+MIN_STOCK_PRICE = 5.0          # must be above $5 to qualify
+MIN_HISTORY_DAYS = 252         # at least 1 year of price history
+MIN_ADV_USD = 1_000_000        # minimum 20-day avg daily dollar volume ($1M)
 
 # Maximum allocation to any single position (concentration cap)
 # Prevents over-weighting a single name regardless of sector weight
