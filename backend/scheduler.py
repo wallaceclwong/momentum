@@ -31,8 +31,7 @@ def setup_scheduler():
     scheduler.add_job(
         func=run_monthly_screener,
         trigger=CronTrigger(
-            day="last",
-            day_of_week="fri",  # Last Friday
+            day="last fri",  # Last Friday of each month
             hour="22",
             minute="0",
             timezone="UTC"
