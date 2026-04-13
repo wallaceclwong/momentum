@@ -19,6 +19,7 @@ Notes:
 import sys
 import logging
 import argparse
+import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -72,9 +73,14 @@ def is_last_friday_of_month(d: date = None) -> bool:
 
 def get_target_weights(deployment: float = 1.0) -> dict:
     """Run screener and return target weight dict {ticker: weight}."""
-    from backend.config import USE_VOLATILITY_WEIGHTING, MAX_POSITION_WEIGHT, USE_EARNINGS_IN_SCREENER, EARNINGS_LOOKBACK
+    from backend.config import (
+        USE_VOLATILITY_WEIGHTING, MAX_POSITION_WEIGHT,
+        USE_EARNINGS_IN_SCREENER, EARNINGS_LOOKBACK,
+        USE_CRASH_PROTECTION,
+    )
     from backend.data.earnings import get_earnings_surprises_batch
     from backend.engine.earnings_filter import filter_by_earnings_momentum
+    from backend.engine.crash_protection import compute_crash_scale
 
     ticker_to_sector = get_ticker_to_sector()
     sector_to_tickers = get_tickers_by_sector()
@@ -94,6 +100,24 @@ def get_target_weights(deployment: float = 1.0) -> dict:
             logger.warning(f"[SCREENER] Earnings fetch failed, continuing without: {e}")
 
     momentum_data = calculate_momentum_for_tickers(price_data, earnings_data=earnings_data or None)
+
+    # ── Crash protection: scale deployment by inverse realised portfolio vol ──
+    if USE_CRASH_PROTECTION:
+        try:
+            from backend.etrade.account import get_positions as _get_pos, get_cash_balance as _get_cash
+            current_positions = _get_pos()
+            if current_positions:
+                portfolio_value = _get_cash()
+                cur_weights = {
+                    p["ticker"]: abs(p["market_value"]) / portfolio_value
+                    for p in current_positions if portfolio_value > 0
+                }
+                price_df = pd.DataFrame({t: df["Close"] for t, df in price_data.items() if "Close" in df.columns})
+                crash_scale = compute_crash_scale(cur_weights, price_df)
+                deployment = round(deployment * crash_scale, 4)
+                logger.info(f"[CRASH] crash_scale={crash_scale:.3f}  final_deploy={deployment:.0%}")
+        except Exception as e:
+            logger.warning(f"[CRASH] Crash scale compute failed, skipping: {e}")
 
     target = {}
     for sector, tickers in sector_to_tickers.items():

@@ -19,9 +19,11 @@ from ..config import (
     REGIME_BEAR_DEPLOYMENT, USE_VOLATILITY_WEIGHTING,
     BACKTEST_SLIPPAGE, BACKTEST_COMMISSION_PER_SHARE,
     MAX_POSITION_WEIGHT, USE_STOP_LOSS, STOP_LOSS_PCT,
-    RISK_PARITY_VOL_DAYS,
+    RISK_PARITY_VOL_DAYS, USE_CRASH_PROTECTION,
+    USE_TAX_AWARE_REBALANCING, TAX_MIN_HOLDING_DAYS, TAX_SCORE_THRESHOLD,
 )
 from ..engine.regime import _classify
+from ..engine.crash_protection import compute_crash_scale
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +247,70 @@ def _download_bulk_prices(tickers: List[str], start_date: str, end_date: str) ->
     return result.dropna(how="all")
 
 
+def _tax_aware_top3(
+    scored: List[Tuple[str, float]],
+    current_holdings: Dict[str, float],
+    entry_dates: Dict[str, datetime],
+    entry_prices: Dict[str, float],
+    prices_to_date: pd.DataFrame,
+    rebalance_date: datetime,
+) -> List[str]:
+    """
+    Select top-3 for a sector with tax-aware rotation.
+
+    Logic:
+      1. Build top-6 candidates by composite score.
+      2. For each CURRENT holding still in the top-6:
+           - If held < TAX_MIN_HOLDING_DAYS AND has an unrealised gain AND
+             the best available replacement does NOT beat its score by
+             TAX_SCORE_THRESHOLD → keep it (defer short-term gain).
+      3. Fill remaining slots with best new candidates.
+    """
+    if not scored:
+        return []
+
+    top6 = scored[:6]
+    top6_tickers = {t for t, _ in top6}
+    top6_scores  = {t: s for t, s in top6}
+    best_score   = scored[0][1]
+
+    kept: List[str] = []
+
+    for t, score in top6:
+        if t not in current_holdings:
+            continue
+        if len(kept) >= 3:
+            break
+
+        entry_d = entry_dates.get(t)
+        entry_p = entry_prices.get(t)
+        held_days = (rebalance_date - entry_d).days if entry_d else TAX_MIN_HOLDING_DAYS
+
+        curr_p = None
+        if t in prices_to_date.columns:
+            s = prices_to_date[t].dropna()
+            curr_p = float(s.iloc[-1]) if not s.empty else None
+
+        is_short_term_gain = (
+            held_days < TAX_MIN_HOLDING_DAYS
+            and curr_p is not None
+            and entry_p is not None
+            and curr_p > entry_p
+        )
+        if is_short_term_gain and (best_score - score) <= TAX_SCORE_THRESHOLD:
+            kept.append(t)
+
+    kept_set = set(kept)
+    final = list(kept)
+    for t, _ in top6:
+        if t not in kept_set:
+            final.append(t)
+        if len(final) >= 3:
+            break
+
+    return final[:3]
+
+
 def run_backtest(
     start_date: str,
     end_date: str,
@@ -294,8 +360,9 @@ def run_backtest(
     trading_days = all_prices.loc[start_date:end_date].index
     nav = 100.0
     current_holdings: Dict[str, float] = {}
-    entry_prices: Dict[str, float] = {}    # ticker -> price when position opened
-    stopped_tickers: set = set()           # stopped-out this month, skip until rebalance
+    entry_prices: Dict[str, float] = {}          # ticker -> entry price
+    entry_dates:  Dict[str, datetime] = {}       # ticker -> entry date (for tax)
+    stopped_tickers: set = set()                 # stopped-out this month
     nav_records: List[Dict] = []
     positions_count: List[int] = []
 
@@ -325,6 +392,15 @@ def run_backtest(
                     _, deployment = _classify(spy_now, ma50, ma200, vix_now)
                     logger.info(f"  Regime deploy={deployment:.0%}  SPY={spy_now:.1f}  MA50={ma50:.1f}  MA200={ma200:.1f}  VIX={vix_now}")
 
+            # ── Crash protection: scale by inverse realised vol ────────
+            if USE_CRASH_PROTECTION and current_holdings:
+                crash_scale = compute_crash_scale(
+                    current_holdings,
+                    prices_to_date,
+                )
+                deployment = round(deployment * crash_scale, 4)
+                logger.info(f"  Crash-scale={crash_scale:.3f}  final_deploy={deployment:.0%}")
+
             # ── Point-in-time constituents (survivorship bias fix) ───────
             from ..data.sp500 import get_tickers_by_sector as _gts
             pit_sector_to_tickers = _gts(as_of=trade_date.to_pydatetime())
@@ -349,10 +425,9 @@ def run_backtest(
             from ..engine.portfolio import get_sector_etf_weights as _gsw
             sector_weights = _gsw(prices=etf_prices_to_date)
 
-            # ── Select top 3 per sector ───────────────────────────────────
+            # ── Select top 3 per sector (tax-aware) ───────────────────
             new_holdings: Dict[str, float] = {}
             for sector, tickers in pit_sector_to_tickers.items():
-                # Exclude tickers stopped out this rebalance cycle
                 eligible = [t for t in tickers if t not in stopped_tickers]
                 scores = [
                     (t, momentum_data[t]["composite_score"])
@@ -360,7 +435,15 @@ def run_backtest(
                     if t in momentum_data and momentum_data[t].get("composite_score") is not None
                 ]
                 scores.sort(key=lambda x: x[1], reverse=True)
-                top3 = [t for t, _ in scores[:3]]
+
+                if USE_TAX_AWARE_REBALANCING:
+                    top3 = _tax_aware_top3(
+                        scores, current_holdings, entry_dates, entry_prices,
+                        prices_to_date, trade_date.to_pydatetime(),
+                    )
+                else:
+                    top3 = [t for t, _ in scores[:3]]
+
                 sw = sector_weights.get(sector, 0.0) * deployment
                 if not top3 or sw <= 0:
                     continue
@@ -394,17 +477,18 @@ def run_backtest(
                         capped[t] += clipped * (uncapped[t] / uncapped_total)
             new_holdings = capped
 
-            # ── Update entry prices for new / re-entered positions ────────
+            # ── Update entry prices / dates for new positions ─────────
             for t in new_holdings:
-                if t not in current_holdings:  # new entry
+                if t not in current_holdings:
                     if t in prices_to_date.columns:
                         ep = prices_to_date[t].dropna()
                         if not ep.empty:
                             entry_prices[t] = float(ep.iloc[-1])
-            # Remove entry prices for exited positions
+                            entry_dates[t]  = trade_date.to_pydatetime()
             for t in list(entry_prices.keys()):
                 if t not in new_holdings:
                     del entry_prices[t]
+                    entry_dates.pop(t, None)
 
             # ── Transaction costs ────────────────────────────────────────
             rebalance_cost = 0.0

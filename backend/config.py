@@ -97,6 +97,23 @@ RISK_PARITY_VOL_DAYS = 60       # lookback for sector ETF volatility
 USE_STOP_LOSS   = True
 STOP_LOSS_PCT   = 0.15          # 15% loss from entry triggers exit
 
+# Momentum crash protection (Barroso & Santa-Clara 2015)
+# Scales ALL position sizes by min(1, TARGET_VOL / realised_portfolio_vol)
+# Protects against rapid momentum reversals (2009, 2020) without needing a VIX signal
+USE_CRASH_PROTECTION          = True
+CRASH_PROTECTION_TARGET_VOL   = 0.15   # annualised vol target (15%)
+CRASH_PROTECTION_LOOKBACK     = 21     # trading days (~1 month) for vol estimation
+
+# Tax-aware rebalancing (backtest + live)
+# Keeps a current holding when: held < 1yr AND has an unrealised gain AND
+# the best replacement candidate doesn't beat its score by TAX_SCORE_THRESHOLD.
+# Defers short-term capital gains tax realisation at the cost of slight stale picks.
+USE_TAX_AWARE_REBALANCING = True
+TAX_SHORT_TERM_RATE       = 0.37   # US top bracket short-term rate
+TAX_LONG_TERM_RATE        = 0.20   # US long-term rate
+TAX_MIN_HOLDING_DAYS      = 365    # days needed for long-term treatment
+TAX_SCORE_THRESHOLD       = 0.30   # new pick must beat current by this z-score margin
+
 # Drawdown circuit breaker: skip rebalance if portfolio down >15% from peak
 CIRCUIT_BREAKER_THRESHOLD = 0.85
 
