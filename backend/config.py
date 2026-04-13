@@ -74,10 +74,28 @@ MIN_ADV_USD = 1_000_000        # minimum 20-day avg daily dollar volume ($1M)
 # Prevents over-weighting a single name regardless of sector weight
 MAX_POSITION_WEIGHT = 0.05   # 5% max per stock
 
-# Market regime filter: reduce exposure when SPY < 200-day MA
+# Market regime filter — graduated 5-state model using SPY MAs + VIX
 USE_REGIME_FILTER = True
-REGIME_MA_DAYS = 200
-REGIME_BEAR_DEPLOYMENT = 0.3   # 30% in bear (was 50% — more defensive)
+REGIME_MA_DAYS   = 200          # long-term trend
+REGIME_MA_SHORT  = 50           # short-term trend
+REGIME_VIX_HIGH  = 20           # elevated fear
+REGIME_VIX_EXTREME = 30         # crisis fear
+# Deployment by regime state (fraction of capital to deploy)
+REGIME_STRONG_BULL   = 1.00     # SPY > MA50 > MA200, VIX < 20
+REGIME_BULL          = 0.80     # SPY > MA200, VIX < 25
+REGIME_VOLATILE_BULL = 0.50     # SPY > MA200 but VIX elevated
+REGIME_BEAR          = 0.30     # SPY < MA200, VIX < 30
+REGIME_CRISIS        = 0.15     # SPY < MA200 + VIX >= 30
+REGIME_BEAR_DEPLOYMENT = 0.30   # kept for backward compat
+
+# Risk-parity sector weighting: weight each sector inversely to its 60-day volatility
+# True = risk parity  |  False = market-cap ETF weights (legacy)
+USE_RISK_PARITY_SECTORS = True
+RISK_PARITY_VOL_DAYS = 60       # lookback for sector ETF volatility
+
+# Individual position stop-loss: exit any holding down more than threshold from entry
+USE_STOP_LOSS   = True
+STOP_LOSS_PCT   = 0.15          # 15% loss from entry triggers exit
 
 # Drawdown circuit breaker: skip rebalance if portfolio down >15% from peak
 CIRCUIT_BREAKER_THRESHOLD = 0.85

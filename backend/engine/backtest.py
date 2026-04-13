@@ -15,11 +15,13 @@ from ..engine.portfolio import get_sector_etf_weights
 from .benchmark import fetch_all_benchmarks, align_benchmarks_with_portfolio
 from .metrics import calculate_all_metrics, prepare_nav_series
 from ..config import (
-    USE_REGIME_FILTER, REGIME_MA_DAYS, REGIME_BEAR_DEPLOYMENT,
-    USE_VOLATILITY_WEIGHTING,
+    USE_REGIME_FILTER, REGIME_MA_DAYS, REGIME_MA_SHORT,
+    REGIME_BEAR_DEPLOYMENT, USE_VOLATILITY_WEIGHTING,
     BACKTEST_SLIPPAGE, BACKTEST_COMMISSION_PER_SHARE,
-    MAX_POSITION_WEIGHT,
+    MAX_POSITION_WEIGHT, USE_STOP_LOSS, STOP_LOSS_PCT,
+    RISK_PARITY_VOL_DAYS,
 )
+from ..engine.regime import _classify
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +276,9 @@ def run_backtest(
     download_tickers = list(set(all_tickers) | {"SPY"})
 
     # ── 2. Pre-download ALL prices once (bulk) ────────────────────────
+    # Also include sector ETFs (for risk parity) and VIX (for regime)
+    sector_etfs = ["XLK","XLC","XLY","XLP","XLE","XLF","XLV","XLI","XLB","XLRE","XLU"]
+    download_tickers = list(set(all_tickers) | {"SPY", "^VIX"} | set(sector_etfs))
     logger.info(f"Downloading prices for {len(download_tickers)} tickers ({start_date} – {end_date}) …")
     all_prices = _download_bulk_prices(download_tickers, start_date, end_date)
     if all_prices.empty:
@@ -289,6 +294,8 @@ def run_backtest(
     trading_days = all_prices.loc[start_date:end_date].index
     nav = 100.0
     current_holdings: Dict[str, float] = {}
+    entry_prices: Dict[str, float] = {}    # ticker -> price when position opened
+    stopped_tickers: set = set()           # stopped-out this month, skip until rebalance
     nav_records: List[Dict] = []
     positions_count: List[int] = []
 
@@ -298,18 +305,25 @@ def run_backtest(
         if is_rebalance:
             logger.info(f"Rebalancing on {trade_date.date()}")
             prices_to_date: pd.DataFrame = all_prices.loc[:trade_date]
+            stopped_tickers.clear()   # reset stops at each rebalance
 
-            # ── Regime filter ─────────────────────────────────────────────
+            # ── Graduated regime filter (SPY MA50/MA200 + VIX) ────────────
             deployment = 1.0
             if USE_REGIME_FILTER:
-                spy_series = prices_to_date["SPY"] if "SPY" in prices_to_date.columns else None
+                spy_series = prices_to_date.get("SPY") if hasattr(prices_to_date, 'get') else (
+                    prices_to_date["SPY"] if "SPY" in prices_to_date.columns else None
+                )
+                vix_series = (
+                    prices_to_date["^VIX"] if "^VIX" in prices_to_date.columns else None
+                )
                 if spy_series is not None and len(spy_series.dropna()) >= REGIME_MA_DAYS:
                     spy_clean = spy_series.dropna()
                     spy_now = float(spy_clean.iloc[-1])
-                    spy_ma  = float(spy_clean.iloc[-REGIME_MA_DAYS:].mean())
-                    if spy_now < spy_ma:
-                        deployment = REGIME_BEAR_DEPLOYMENT
-                        logger.info(f"  BEAR regime — deploying {deployment:.0%}")
+                    ma200   = float(spy_clean.iloc[-REGIME_MA_DAYS:].mean())
+                    ma50    = float(spy_clean.iloc[-REGIME_MA_SHORT:].mean()) if len(spy_clean) >= REGIME_MA_SHORT else spy_now
+                    vix_now = float(vix_series.dropna().iloc[-1]) if vix_series is not None and len(vix_series.dropna()) > 0 else None
+                    _, deployment = _classify(spy_now, ma50, ma200, vix_now)
+                    logger.info(f"  Regime deploy={deployment:.0%}  SPY={spy_now:.1f}  MA50={ma50:.1f}  MA200={ma200:.1f}  VIX={vix_now}")
 
             # ── Point-in-time constituents (survivorship bias fix) ───────
             from ..data.sp500 import get_tickers_by_sector as _gts
@@ -326,12 +340,23 @@ def run_backtest(
             from ..engine.momentum import calculate_momentum_for_tickers as _calc
             momentum_data = _calc(ticker_dfs)
 
+            # ── Risk-parity sector weights (computed from ETFs to date) ──
+            etf_prices_to_date = {
+                etf: prices_to_date[etf].dropna()
+                for etf in sector_etfs
+                if etf in prices_to_date.columns
+            }
+            from ..engine.portfolio import get_sector_etf_weights as _gsw
+            sector_weights = _gsw(prices=etf_prices_to_date)
+
             # ── Select top 3 per sector ───────────────────────────────────
             new_holdings: Dict[str, float] = {}
             for sector, tickers in pit_sector_to_tickers.items():
+                # Exclude tickers stopped out this rebalance cycle
+                eligible = [t for t in tickers if t not in stopped_tickers]
                 scores = [
                     (t, momentum_data[t]["composite_score"])
-                    for t in tickers
+                    for t in eligible
                     if t in momentum_data and momentum_data[t].get("composite_score") is not None
                 ]
                 scores.sort(key=lambda x: x[1], reverse=True)
@@ -369,6 +394,18 @@ def run_backtest(
                         capped[t] += clipped * (uncapped[t] / uncapped_total)
             new_holdings = capped
 
+            # ── Update entry prices for new / re-entered positions ────────
+            for t in new_holdings:
+                if t not in current_holdings:  # new entry
+                    if t in prices_to_date.columns:
+                        ep = prices_to_date[t].dropna()
+                        if not ep.empty:
+                            entry_prices[t] = float(ep.iloc[-1])
+            # Remove entry prices for exited positions
+            for t in list(entry_prices.keys()):
+                if t not in new_holdings:
+                    del entry_prices[t]
+
             # ── Transaction costs ────────────────────────────────────────
             rebalance_cost = 0.0
             for t, new_w in new_holdings.items():
@@ -381,6 +418,20 @@ def run_backtest(
             nav -= rebalance_cost
 
             current_holdings = new_holdings
+
+        # ── Stop-loss check (daily) ──────────────────────────────────────
+        if USE_STOP_LOSS and current_holdings and trade_date in all_prices.index:
+            for ticker in list(current_holdings.keys()):
+                if ticker not in entry_prices or ticker not in all_prices.columns:
+                    continue
+                curr_p = all_prices.loc[trade_date, ticker]
+                ep = entry_prices[ticker]
+                if pd.notna(curr_p) and ep > 0 and curr_p < ep * (1 - STOP_LOSS_PCT):
+                    loss_pct = (curr_p / ep - 1) * 100
+                    logger.debug(f"  STOP-LOSS {ticker} {loss_pct:.1f}% — exiting")
+                    del current_holdings[ticker]
+                    del entry_prices[ticker]
+                    stopped_tickers.add(ticker)
 
         # Daily return
         if i > 0 and current_holdings:

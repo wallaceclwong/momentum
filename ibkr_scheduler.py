@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from backend.ibkr.gateway import connect, disconnect, is_dry_run, IBKR_LIVE
+from backend.ibkr.gateway import connect, disconnect, get_ib, is_dry_run, IBKR_LIVE
+from backend.config import STOP_LOSS_PCT
 from backend.ibkr.account import get_positions, get_cash_balance
 from backend.ibkr.trader import compute_rebalance_trades, execute_rebalance
 from backend.notify.telegram import (
@@ -280,6 +281,70 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         disconnect()
 
 
+# ── Daily stop-loss monitor ────────────────────────────────────
+
+def job_check_stop_losses(dry_run: bool = False):
+    """
+    Daily job at 15:45 ET: exit any position down >= STOP_LOSS_PCT from avg cost.
+    Protects against intra-month blowups without waiting for next rebalance.
+    """
+    from backend.config import USE_STOP_LOSS, STOP_LOSS_PCT
+    if not USE_STOP_LOSS:
+        return
+
+    logger.info("[STOP-LOSS] Running daily stop-loss check...")
+    try:
+        positions = get_positions()
+    except Exception as e:
+        logger.error(f"[STOP-LOSS] Could not fetch positions: {e}")
+        return
+
+    triggered = []
+    for p in positions:
+        avg_cost = p.get("avg_cost", 0)
+        curr_price = p.get("current_price", 0)
+        if avg_cost and avg_cost > 0 and curr_price > 0:
+            loss = (curr_price - avg_cost) / avg_cost
+            if loss <= -STOP_LOSS_PCT:
+                triggered.append(p)
+                logger.warning(
+                    f"[STOP-LOSS] {p['ticker']}  "
+                    f"cost={avg_cost:.2f}  now={curr_price:.2f}  "
+                    f"loss={loss*100:.1f}%"
+                )
+
+    if not triggered:
+        logger.info("[STOP-LOSS] No positions triggered.")
+        return
+
+    sells = [
+        {
+            "ticker":          p["ticker"],
+            "shares":          abs(p["quantity"]),
+            "estimated_value": abs(p["market_value"]),
+            "reason":          f"Stop-loss triggered ({(p['current_price']/p['avg_cost']-1)*100:.1f}%)",
+        }
+        for p in triggered
+    ]
+
+    results = execute_rebalance(
+        buys=[], sells=sells,
+        dry_run=(dry_run or is_dry_run()),
+        delay_seconds=0.3,
+    )
+
+    tickers = [p["ticker"] for p in triggered]
+    verb = "would sell" if (dry_run or is_dry_run()) else "sold"
+    logger.info(f"[STOP-LOSS] {verb} {len(tickers)} positions: {tickers}")
+    send(
+        f"*Stop-Loss Alert {'(DRY RUN)' if (dry_run or is_dry_run()) else ''}*\n"
+        + "\n".join(
+            f"• {p['ticker']}: {(p['current_price']/p['avg_cost']-1)*100:.1f}% loss"
+            for p in triggered
+        )
+    )
+
+
 # ── Entry point ────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -307,11 +372,20 @@ if __name__ == "__main__":
         name="Monthly Momentum Rebalance",
     )
 
+    # Mon–Fri 15:45 ET — daily stop-loss monitor
+    scheduler.add_job(
+        lambda: job_check_stop_losses(dry_run=args.dry_run),
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=45),
+        id="stop_loss_check",
+        name="Daily Stop-Loss Monitor",
+    )
+
     logger.info("=" * 60)
     logger.info(f"IBKR Momentum Scheduler Started  [{broker_label}]")
-    logger.info(f"  Rebalance : last Friday of month at 15:50 ET")
-    logger.info(f"  Log file  : {LOG_PATH.resolve()}")
-    logger.info(f"  Mode      : {'DRY RUN — no orders placed' if not IBKR_LIVE else 'LIVE ORDERS'}")
+    logger.info(f"  Rebalance  : last Friday of month at 15:50 ET")
+    logger.info(f"  Stop-loss  : Mon–Fri at 15:45 ET (>{int(STOP_LOSS_PCT*100)}% loss)")
+    logger.info(f"  Log file   : {LOG_PATH.resolve()}")
+    logger.info(f"  Mode       : {'DRY RUN — no orders placed' if not IBKR_LIVE else 'LIVE ORDERS'}")
     logger.info("=" * 60)
 
     notify_startup(broker_label)

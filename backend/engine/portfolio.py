@@ -1,57 +1,124 @@
 """Portfolio allocation engine - applies sector ETF weights to picks."""
 from typing import Dict, List
 import yfinance as yf
+import pandas as pd
+import numpy as np
 import logging
 
-from backend.config import SECTORS, SECTOR_TO_ETF
+from backend.config import SECTORS, SECTOR_TO_ETF, USE_RISK_PARITY_SECTORS, RISK_PARITY_VOL_DAYS
 
 logger = logging.getLogger(__name__)
 
 
-def get_sector_etf_weights() -> Dict[str, float]:
+def get_sector_risk_parity_weights(
+    prices: Dict[str, pd.Series] = None,
+) -> Dict[str, float]:
     """
-    Fetch current sector ETF market cap weights.
-    
-    Uses the market cap of each sector ETF as a proxy for sector weight.
-    In production, you might use actual S&P 500 sector weights from an index provider.
-    
+    Risk-parity sector weights: each sector weighted inversely to its
+    RISK_PARITY_VOL_DAYS rolling volatility.
+
+    Lower-vol sectors (e.g. Utilities, Staples) get MORE weight vs
+    high-vol sectors (e.g. Tech, Energy) — equalizing risk contribution.
+
+    Args:
+        prices: Optional pre-loaded {etf_ticker: price_series} for backtesting.
+                If None, fetches live data.
+
     Returns:
-        Dict mapping sector_name -> weight (0-1, sum to ~1.0)
+        Dict mapping sector_name -> weight (sum to 1.0)
     """
+    etf_tickers = list(SECTORS.keys())
+    sector_vols: Dict[str, float] = {}
+
+    if prices is None:
+        try:
+            raw = yf.download(
+                etf_tickers, period="6mo", interval="1d",
+                auto_adjust=True, progress=False, group_by="ticker",
+            )
+            if isinstance(raw.columns, pd.MultiIndex):
+                close = raw.xs("Close", axis=1, level=1)
+            else:
+                close = raw[["Close"]].rename(columns={"Close": etf_tickers[0]})
+        except Exception as e:
+            logger.warning(f"[RISK_PARITY] Failed to fetch ETF prices: {e} — using equal weights")
+            n = len(SECTORS)
+            return {s: 1.0 / n for s in SECTORS.values()}
+    else:
+        close = pd.DataFrame(prices)
+
+    for etf, sector in SECTORS.items():
+        try:
+            series = close[etf].dropna() if etf in close.columns else pd.Series(dtype=float)
+            if len(series) < RISK_PARITY_VOL_DAYS:
+                continue
+            daily_rets = series.pct_change().dropna().iloc[-RISK_PARITY_VOL_DAYS:]
+            vol = float(daily_rets.std() * (252 ** 0.5))
+            if vol > 0:
+                sector_vols[sector] = vol
+        except Exception as e:
+            logger.warning(f"[RISK_PARITY] Vol calc failed for {etf}: {e}")
+
+    if not sector_vols:
+        n = len(SECTORS)
+        return {s: 1.0 / n for s in SECTORS.values()}
+
+    inv_vols = {s: 1.0 / v for s, v in sector_vols.items()}
+    total_inv = sum(inv_vols.values())
+    weights = {s: iv / total_inv for s, iv in inv_vols.items()}
+
+    # Fill any missing sectors with zero (will get skipped in screener)
+    for sector in SECTORS.values():
+        if sector not in weights:
+            weights[sector] = 0.0
+
+    logger.info(
+        f"[RISK_PARITY] Sector weights computed. "
+        f"Lowest vol: {min(sector_vols, key=sector_vols.get)} "
+        f"Highest vol: {max(sector_vols, key=sector_vols.get)}"
+    )
+    return weights
+
+
+def get_sector_etf_weights(prices: Dict[str, pd.Series] = None) -> Dict[str, float]:
+    """
+    Return sector weights.
+
+    When USE_RISK_PARITY_SECTORS=True (default), delegates to
+    get_sector_risk_parity_weights() — sectors weighted by inverse volatility.
+
+    Falls back to market-cap AUM weights from SPDR ETFs if risk parity fails.
+
+    Args:
+        prices: Optional pre-loaded ETF price dict for backtesting.
+    """
+    if USE_RISK_PARITY_SECTORS:
+        return get_sector_risk_parity_weights(prices=prices)
+
+    # ── Legacy: SPDR ETF AUM-based market-cap weights ──────────
     etf_market_caps = {}
     total_market_cap = 0
-    
+
     for etf_ticker, sector_name in SECTORS.items():
         try:
             etf = yf.Ticker(etf_ticker)
             info = etf.info
-            
-            # Try to get market cap or AUM proxy
             market_cap = info.get("totalAssets") or info.get("marketCap")
-            
             if market_cap:
                 etf_market_caps[sector_name] = market_cap
                 total_market_cap += market_cap
             else:
-                # Fallback: use equal weight if data unavailable
-                logger.warning(f"No market cap for {etf_ticker}, using equal weight")
-                
+                logger.warning(f"No AUM for {etf_ticker}, using equal weight")
         except Exception as e:
             logger.warning(f"Failed to fetch ETF data for {etf_ticker}: {e}")
-    
+
     if not etf_market_caps or total_market_cap == 0:
-        # Equal weights fallback
         logger.warning("Using equal sector weights due to data fetch failure")
         n_sectors = len(SECTORS)
         return {sector: 1.0 / n_sectors for sector in SECTORS.values()}
-    
-    # Normalize to percentages
-    weights = {
-        sector: cap / total_market_cap
-        for sector, cap in etf_market_caps.items()
-    }
-    
-    logger.info(f"Sector weights sum: {sum(weights.values()):.4f}")
+
+    weights = {s: c / total_market_cap for s, c in etf_market_caps.items()}
+    logger.info(f"Sector weights (AUM) sum: {sum(weights.values()):.4f}")
     return weights
 
 
