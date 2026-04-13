@@ -1,0 +1,23 @@
+﻿
+
+StatusCode        : 200
+StatusDescription : OK
+Content           : {"run_id":"d06b2b20-e075-4640-b4f0-7bb290953858","status":"completed","parameters":{"start_date":"2023-01-01T00:00:00","end_date":"2023-12-31T00:00:00","rebalanc
+                    e_freq":"monthly"},"created_at":"2026-0...
+RawContent        : HTTP/1.1 200 OK
+                    Content-Length: 13402
+                    Content-Type: application/json
+                    Date: Wed, 08 Apr 2026 17:18:21 GMT
+                    Server: uvicorn
+                    
+                    {"run_id":"d06b2b20-e075-4640-b4f0-7bb290953858","status":"completed","p...
+Forms             : {}
+Headers           : {[Content-Length, 13402], [Content-Type, application/json], [Date, Wed, 08 Apr 2026 17:18:21 GMT], [Server, uvicorn]}
+Images            : {}
+InputFields       : {}
+Links             : {}
+ParsedHtml        : mshtml.HTMLDocumentClass
+RawContentLength  : 13402
+
+
+

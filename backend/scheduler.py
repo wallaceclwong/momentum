@@ -42,20 +42,6 @@ def setup_scheduler():
         replace_existing=True,
     )
     
-    # Weekly rebalance job (every Monday at 09:30 UTC)
-    scheduler.add_job(
-        func=run_weekly_rebalance,
-        trigger=CronTrigger(
-            day_of_week="mon",
-            hour="9",
-            minute="30",
-            timezone="UTC"
-        ),
-        id="weekly_rebalance",
-        name="Weekly Portfolio Rebalance",
-        replace_existing=True,
-    )
-    
     # Daily performance snapshot (every day at 22:00 UTC)
     scheduler.add_job(
         func=run_daily_snapshot,
@@ -71,7 +57,7 @@ def setup_scheduler():
     
     # Start scheduler
     scheduler.start()
-    logger.info("Scheduler started with 3 jobs configured")
+    logger.info("Scheduler started with 2 jobs configured")
 
 
 async def run_monthly_screener():
@@ -110,39 +96,6 @@ async def run_monthly_screener():
             
     except Exception as e:
         logger.error(f"Monthly screener failed: {e}", exc_info=True)
-
-
-async def run_weekly_rebalance():
-    """Run weekly portfolio rebalance."""
-    logger.info("Running weekly portfolio rebalance...")
-    
-    try:
-        # Get latest portfolio from database
-        db = SessionLocal()
-        try:
-            latest_portfolio = get_latest_portfolio(db)
-            if not latest_portfolio:
-                logger.warning("No existing portfolio found, skipping rebalance")
-                return
-            
-            # For now, just save a new snapshot with current prices
-            # In a real implementation, you'd recalculate weights based on current prices
-            portfolio_summary = get_portfolio_summary(latest_portfolio)
-            
-            save_portfolio_snapshot(db, latest_portfolio, portfolio_summary)
-            save_performance_log(db, portfolio_summary)
-            
-            db.commit()
-            logger.info("Weekly rebalance completed")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database error during weekly rebalance: {e}")
-            raise
-        finally:
-            db.close()
-            
-    except Exception as e:
-        logger.error(f"Weekly rebalance failed: {e}", exc_info=True)
 
 
 async def run_daily_snapshot():

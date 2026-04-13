@@ -135,9 +135,13 @@ def get_live_portfolio(benchmark_tickers: List[str] = None) -> Dict:
 
         def get_price(ticker):
             try:
-                if len(all_fetch) == 1:
-                    return float(raw["Close"].dropna().iloc[-1])
-                return float(raw["Close"][ticker].dropna().iloc[-1])
+                close = raw["Close"]
+                if hasattr(close, "columns"):
+                    # MultiIndex or multi-ticker: close is a DataFrame
+                    return float(close[ticker].dropna().iloc[-1])
+                else:
+                    # Single-ticker flat Series
+                    return float(close.dropna().iloc[-1])
             except Exception:
                 return None
 
@@ -182,12 +186,18 @@ def get_live_portfolio(benchmark_tickers: List[str] = None) -> Dict:
             try:
                 bm_price_now = get_price(bm)
                 bm_data = yf.download(bm, start=first_entry.strftime("%Y-%m-%d"),
-                                      period=None, interval="1d",
+                                      interval="1d",
                                       progress=False, auto_adjust=True)
-                bm_price_start = float(bm_data["Close"].dropna().iloc[0])
+                # Handle both flat and MultiIndex columns (yfinance version differences)
+                close_col = bm_data["Close"]
+                if hasattr(close_col, "columns"):
+                    close_col = close_col.iloc[:, 0]
+                close_series = close_col.dropna()
+                bm_price_start = float(close_series.iloc[0])
                 bm_return = ((bm_price_now - bm_price_start) / bm_price_start * 100) if bm_price_start else 0
                 benchmarks[bm] = round(bm_return, 2)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Benchmark fetch failed for {bm}: {e}")
                 benchmarks[bm] = None
 
         rows.sort(key=lambda x: x["gain_loss_pct"], reverse=True)

@@ -12,7 +12,7 @@ export function LoadingSkeleton({ className, lines = 3 }: LoadingSkeletonProps) 
         <div
           key={i}
           className="h-4 bg-gray-200 rounded animate-pulse"
-          style={{ width: `${Math.random() * 40 + 60}%` }}
+          style={{ width: `${60 + ((i * 7) % 40)}%` }}
         />
       ))}
     </div>
