@@ -56,6 +56,7 @@ from backend.data.sp500 import get_ticker_to_sector, get_tickers_by_sector
 from backend.engine.portfolio import get_sector_etf_weights
 from backend.engine.momentum import calculate_momentum_for_tickers
 from backend.data.prices import fetch_price_history
+from backend.config import STOP_LOSS_PCT, USE_STOP_LOSS
 
 ACCOUNT_ID_KEY   = "dBZOKt9xDrtRSAOl4MSiiA"  # Brokerage MARGIN
 VIRTUAL_CAPITAL  = 100_000.0                  # Portfolio size for simulation
@@ -192,8 +193,16 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
 
     # ── Regime filter ──────────────────────────────────────────────
     regime = get_regime()
-    logger.info(f"[REGIME] {regime['label']}  SPY={regime['spy_price']}  MA200={regime['spy_ma200']}  deploy={regime['deployment']:.0%}")
-    send(f"*Regime check:* {regime['label']} market\nSPY: ${regime['spy_price']} vs MA200: ${regime['spy_ma200']}\nDeployment: {regime['deployment']:.0%}")
+    logger.info(
+        f"[REGIME] {regime['label']}  SPY={regime['spy_price']}"
+        f"  MA50={regime['spy_ma50']}  MA200={regime['spy_ma200']}"
+        f"  VIX={regime['vix']}  deploy={regime['deployment']:.0%}"
+    )
+    send(
+        f"*Regime:* {regime['label']}\n"
+        f"SPY ${regime['spy_price']} | MA50 ${regime['spy_ma50']} | MA200 ${regime['spy_ma200']}\n"
+        f"VIX {regime['vix']} | Deploy {regime['deployment']:.0%}"
+    )
 
     # ── Circuit breaker ───────────────────────────────────────────
     global _PEAK_NAV
@@ -285,7 +294,75 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         logger.error(f"[TRACKER] Failed to update portfolio tracker: {e}")
 
 
-# ── Main ──────────────────────────────────────────────────────
+# ── Daily stop-loss monitor ──────────────────────────────────
+
+def job_check_stop_losses(dry_run: bool = False):
+    """
+    Daily job at 15:45 ET: exit any position down >= STOP_LOSS_PCT from avg cost.
+    """
+    if not USE_STOP_LOSS:
+        return
+
+    if not renew_token():
+        logger.warning("[STOP-LOSS] Token expired, cannot check positions")
+        return
+
+    logger.info("[STOP-LOSS] Running daily stop-loss check...")
+    try:
+        port_data = get_portfolio(ACCOUNT_ID_KEY)
+        positions = parse_positions(port_data)
+    except Exception as e:
+        logger.error(f"[STOP-LOSS] Could not fetch positions: {e}")
+        return
+
+    triggered = []
+    for p in positions:
+        avg_cost  = p.get("avg_cost", 0)
+        curr_price = p.get("current_price", 0)
+        if avg_cost and avg_cost > 0 and curr_price > 0:
+            loss = (curr_price - avg_cost) / avg_cost
+            if loss <= -STOP_LOSS_PCT:
+                triggered.append(p)
+                logger.warning(
+                    f"[STOP-LOSS] {p['ticker']}  "
+                    f"cost={avg_cost:.2f}  now={curr_price:.2f}  "
+                    f"loss={loss*100:.1f}%"
+                )
+
+    if not triggered:
+        logger.info("[STOP-LOSS] No positions triggered.")
+        return
+
+    sells = [
+        {
+            "ticker":          p["ticker"],
+            "shares":          abs(p.get("quantity", 0)),
+            "estimated_value": abs(p.get("market_value", 0)),
+            "reason":          f"Stop-loss ({(p['current_price']/p['avg_cost']-1)*100:.1f}%)",
+        }
+        for p in triggered
+    ]
+
+    results = execute_rebalance(
+        ACCOUNT_ID_KEY,
+        buys=[], sells=sells,
+        dry_run=dry_run,
+        delay_seconds=0.3,
+    )
+
+    tickers = [p["ticker"] for p in triggered]
+    verb = "would sell" if dry_run else "sold"
+    logger.info(f"[STOP-LOSS] {verb} {len(tickers)} positions: {tickers}")
+    send(
+        f"*Stop-Loss Alert {'(DRY RUN)' if dry_run else ''}*\n"
+        + "\n".join(
+            f"• {p['ticker']}: {(p['current_price']/p['avg_cost']-1)*100:.1f}% loss"
+            for p in triggered
+        )
+    )
+
+
+# ── Main ─────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--now",     action="store_true", help="Force rebalance immediately")
@@ -318,10 +395,19 @@ if __name__ == "__main__":
         name="Monthly Momentum Rebalance"
     )
 
+    # Mon–Fri 15:45 ET — daily stop-loss monitor
+    scheduler.add_job(
+        lambda: job_check_stop_losses(dry_run=args.dry_run),
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=45),
+        id="stop_loss_check",
+        name="Daily Stop-Loss Monitor"
+    )
+
     logger.info(f"{'='*60}")
-    logger.info(f"Momentum Scheduler Started  [{env_label}]")
+    logger.info(f"E*Trade Momentum Scheduler Started  [{env_label}]")
     logger.info(f"  Token renewal : daily at 08:55 AM ET")
     logger.info(f"  Rebalance     : last Friday of month at 15:50 ET")
+    logger.info(f"  Stop-loss     : Mon–Fri at 15:45 ET (>{int(STOP_LOSS_PCT*100)}% loss)")
     logger.info(f"  Log file      : {LOG_PATH.resolve()}")
     logger.info(f"  Mode          : {'DRY RUN' if args.dry_run else 'LIVE ORDERS'}")
     logger.info(f"{'='*60}")

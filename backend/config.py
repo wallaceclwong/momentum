@@ -108,7 +108,7 @@ CRASH_PROTECTION_LOOKBACK     = 21     # trading days (~1 month) for vol estimat
 # Keeps a current holding when: held < 1yr AND has an unrealised gain AND
 # the best replacement candidate doesn't beat its score by TAX_SCORE_THRESHOLD.
 # Defers short-term capital gains tax realisation at the cost of slight stale picks.
-USE_TAX_AWARE_REBALANCING = True
+USE_TAX_AWARE_REBALANCING = False  # HK has no CGT — monthly rotation is optimal
 TAX_SHORT_TERM_RATE       = 0.37   # US top bracket short-term rate
 TAX_LONG_TERM_RATE        = 0.20   # US long-term rate
 TAX_MIN_HOLDING_DAYS      = 365    # days needed for long-term treatment

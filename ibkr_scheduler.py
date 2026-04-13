@@ -105,24 +105,10 @@ def get_target_weights(deployment: float = 1.0) -> dict:
 
     momentum_data = calculate_momentum_for_tickers(price_data, earnings_data=earnings_data or None)
 
-    # ── Crash protection: scale deployment by inverse realised portfolio vol ──
-    if USE_CRASH_PROTECTION:
-        try:
-            current_positions = get_positions()
-            if current_positions:
-                portfolio_value = get_cash_balance()
-                cur_weights = {
-                    p["ticker"]: abs(p["market_value"]) / portfolio_value
-                    for p in current_positions
-                    if portfolio_value > 0
-                }
-                price_df = pd.DataFrame({t: df["Close"] for t, df in price_data.items() if "Close" in df.columns})
-                crash_scale = compute_crash_scale(cur_weights, price_df)
-                deployment = round(deployment * crash_scale, 4)
-                logger.info(f"[CRASH] crash_scale={crash_scale:.3f}  final_deploy={deployment:.0%}")
-        except Exception as e:
-            logger.warning(f"[CRASH] Crash scale compute failed, skipping: {e}")
-
+    # NOTE: crash protection is applied in job_monthly_rebalance() AFTER
+    # connecting and fetching live positions — not here, to avoid requiring
+    # an IB Gateway connection during screener execution.
+    # price_data is returned so the caller can use it for crash vol estimate.
     target = {}
     for sector, tickers in sector_to_tickers.items():
         scores = [
@@ -166,7 +152,7 @@ def get_target_weights(deployment: float = 1.0) -> dict:
             uncapped_total = sum(uncapped.values())
             for t in uncapped:
                 capped[t] += clipped * (uncapped[t] / uncapped_total)
-    return capped
+    return capped, price_data  # also return price_data for crash vol estimate
 
 
 # ── Main rebalance job ─────────────────────────────────────────
@@ -190,12 +176,13 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         regime = get_regime()
         logger.info(
             f"[REGIME] {regime['label']}  SPY={regime['spy_price']}"
-            f"  MA200={regime['spy_ma200']}  deploy={regime['deployment']:.0%}"
+            f"  MA50={regime['spy_ma50']}  MA200={regime['spy_ma200']}"
+            f"  VIX={regime['vix']}  deploy={regime['deployment']:.0%}"
         )
         send(
-            f"*Regime check:* {regime['label']} market\n"
-            f"SPY: ${regime['spy_price']} vs MA200: ${regime['spy_ma200']}\n"
-            f"Deployment: {regime['deployment']:.0%}"
+            f"*Regime:* {regime['label']}\n"
+            f"SPY ${regime['spy_price']} | MA50 ${regime['spy_ma50']} | MA200 ${regime['spy_ma200']}\n"
+            f"VIX {regime['vix']} | Deploy {regime['deployment']:.0%}"
         )
         deployment = regime["deployment"]
     except Exception as e:
@@ -243,7 +230,7 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
     # ── Run screener ───────────────────────────────────────────
     logger.info("[SCREENER] Running momentum screener...")
     try:
-        target_weights = get_target_weights(deployment=deployment)
+        target_weights, price_data_cache = get_target_weights(deployment=deployment)
         logger.info(f"[SCREENER] {len(target_weights)} target positions (deploy={deployment:.0%})")
     except Exception as e:
         logger.error(f"[ERROR] Screener failed: {e}")
@@ -268,6 +255,26 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
         logger.error(f"[ERROR] Failed to fetch account state: {e}")
         notify_error("Account fetch", str(e))
         return
+
+    # ── Crash protection (applied here, after live positions fetched) ──
+    from backend.config import USE_CRASH_PROTECTION
+    if USE_CRASH_PROTECTION and current_positions and portfolio_value > 0:
+        try:
+            from backend.engine.crash_protection import compute_crash_scale
+            cur_weights = {
+                p["ticker"]: abs(p["market_value"]) / portfolio_value
+                for p in current_positions
+            }
+            price_df = pd.DataFrame({
+                t: df["Close"] for t, df in price_data_cache.items()
+                if "Close" in df.columns and t in cur_weights
+            })
+            crash_scale = compute_crash_scale(cur_weights, price_df)
+            if crash_scale < 1.0:
+                target_weights = {t: round(w * crash_scale, 6) for t, w in target_weights.items()}
+                logger.info(f"[CRASH] scale={crash_scale:.3f}  weights scaled down")
+        except Exception as e:
+            logger.warning(f"[CRASH] Scale compute failed, skipping: {e}")
 
     # ── Compute trades ─────────────────────────────────────────
     buys, sells = compute_rebalance_trades(target_weights, current_positions, portfolio_value)
