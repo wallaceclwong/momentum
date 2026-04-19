@@ -141,5 +141,58 @@ def test_cost_estimate_positive(simple_signal):
     assert 30 < plan.estimated_cost < 100
 
 
+def test_position_replay_survives_idempotent_runs(tmp_path, monkeypatch):
+    """
+    Regression for position-reconstruction bug:
+    After a full-entry run (3 BUYs), subsequent idempotent runs (0 trades)
+    must not cause next non-trivial run to re-buy everything.
+    """
+    from backend.engine import sector_executor as se
+    # Point DB at a tmp file
+    tmp_db = tmp_path / "test_positions.db"
+    monkeypatch.setattr(se, "DB_PATH", tmp_db)
+
+    # Fabricate sequence: id=1 has 3 BUYs with target_shares; id=2 has 0 trades (empty)
+    buy_trades = [
+        {"action": "BUY", "ticker": "IUIS", "sector": "Industrials",
+         "target_shares": 634.0, "current_shares": 0.0, "delta_shares": 634.0,
+         "est_price": 173.51, "est_value_usd": 110000, "reason": "New position"},
+        {"action": "BUY", "ticker": "IUIT", "sector": "Information Technology",
+         "target_shares": 713.0, "current_shares": 0.0, "delta_shares": 713.0,
+         "est_price": 154.35, "est_value_usd": 110000, "reason": "New position"},
+        {"action": "BUY", "ticker": "IUMS", "sector": "Materials",
+         "target_shares": 2120.0, "current_shares": 0.0, "delta_shares": 2120.0,
+         "est_price": 51.88, "est_value_usd": 110000, "reason": "New position"},
+    ]
+
+    # Directly insert into DB simulating past runs
+    import json, sqlite3
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(se.DDL_SECTOR_SIGNALS); conn.execute(se.DDL_SECTOR_REBALANCES); conn.commit()
+    conn.execute(
+        "INSERT INTO sector_rebalances (as_of, mode, portfolio_nav, n_trades, "
+        "total_buy_value, total_sell_value, estimated_cost, trades_json, status) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("2026-03-27", "paper", 330000, 3, 330000, 0, 48.0,
+         json.dumps(buy_trades), "executed"),
+    )
+    # Idempotent run: empty trades
+    conn.execute(
+        "INSERT INTO sector_rebalances (as_of, mode, portfolio_nav, n_trades, "
+        "total_buy_value, total_sell_value, estimated_cost, trades_json, status) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("2026-04-24", "paper", 330000, 0, 0, 0, 0, json.dumps([]), "executed"),
+    )
+    conn.commit(); conn.close()
+
+    # Replay should yield all 3 positions, NOT empty
+    positions = se.get_last_paper_positions()
+    assert set(positions.keys()) == {"IUIS", "IUIT", "IUMS"}, \
+        f"expected 3 positions after replay, got {list(positions.keys())}"
+    assert positions["IUIS"]["shares"] == 634.0
+    assert positions["IUIT"]["shares"] == 713.0
+    assert positions["IUMS"]["shares"] == 2120.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

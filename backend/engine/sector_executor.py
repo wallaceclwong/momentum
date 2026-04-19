@@ -421,31 +421,44 @@ def persist_rebalance(
 
 def get_last_paper_positions() -> Dict[str, Dict]:
     """
-    Reconstruct last-known paper positions from sector_rebalances table.
-    Used when IBKR paper account isn't connected but we want to simulate state.
+    Reconstruct current paper positions by REPLAYING all paper rebalances
+    chronologically.
+
+    Why replay (not just use latest row): when a rebalance is idempotent
+    (0 trades), it stores an empty trades_json, which would look like
+    "no positions" if we only read the latest row.  The true state is
+    whatever the last NON-trivial run produced, carried forward.
+
+    Each Trade's `target_shares` is the ABSOLUTE post-trade state for that
+    ticker (not a delta) — so replay is straightforward:
+      - Any trade with target_shares > 0 → set position to target_shares
+      - Any trade with target_shares == 0 (full exit) → remove position
+      - Tickers NOT in a run → unchanged from prior run
     """
     conn = _get_conn()
     try:
-        row = conn.execute(
-            """SELECT trades_json, fills_json FROM sector_rebalances
+        rows = conn.execute(
+            """SELECT trades_json FROM sector_rebalances
                WHERE mode='paper' AND status='executed'
-               ORDER BY id DESC LIMIT 1"""
-        ).fetchone()
+               ORDER BY id ASC"""
+        ).fetchall()
     finally:
         conn.close()
-    if not row:
-        return {}
-    trades = json.loads(row[0] or "[]")
-    # Reconstruct: start from empty, apply all trades (assume one-shot close+open)
+
     positions: Dict[str, Dict] = {}
-    for t in trades:
-        tk = t["ticker"]
-        if t["action"] == "BUY":
-            positions[tk] = {
-                "shares": t["target_shares"],
-                "price":  t["est_price"],
-                "value":  t["target_shares"] * t["est_price"],
-            }
-        else:  # SELL
-            positions.pop(tk, None)
+    for (trades_json,) in rows:
+        trades = json.loads(trades_json or "[]")
+        for t in trades:
+            tk = t["ticker"]
+            target = float(t.get("target_shares", 0))
+            price  = float(t.get("est_price", 0))
+            if target <= 1e-6:
+                # Full exit
+                positions.pop(tk, None)
+            else:
+                positions[tk] = {
+                    "shares": target,
+                    "price":  price,
+                    "value":  target * price,
+                }
     return positions
