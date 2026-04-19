@@ -19,22 +19,25 @@ MOMENTUM_VENV="${MOMENTUM_VENV:-${MOMENTUM_DIR}/.venv}"
 SECTOR_NAV="${SECTOR_NAV:-100000}"
 SECTOR_MODE="${SECTOR_MODE:-simulate}"   # simulate | ibkr
 
-# ── Gate: only run on last Friday of the month ─────────────────
-TODAY=$(date +%u)                  # 1..7, Mon..Sun
+# ── Gate: only run on last Friday of the month (evaluated in UTC) ─────
+# The systemd timer fires at Fri 19:50 UTC. We must evaluate "what day is
+# it" in UTC too — otherwise on the VM's local timezone (e.g. HKT) the date
+# may already have rolled over to Saturday when the timer fires.
+TODAY=$(TZ=UTC date +%u)                       # 1..7, Mon..Sun
 if [ "$TODAY" != "5" ]; then
-    echo "[$(date -Iseconds)] Not Friday (weekday=$TODAY) — skipping"
+    echo "[$(TZ=UTC date -Iseconds) UTC] Not Friday (weekday=$TODAY) — skipping"
     exit 0
 fi
 
-# Last Friday check: today + 7 days is in next month
-NEXT_WEEK_MONTH=$(date -d "+7 days" +%m)
-THIS_MONTH=$(date +%m)
+# Last Friday check: UTC Friday + 7 days falls in the next UTC month
+NEXT_WEEK_MONTH=$(TZ=UTC date -d "+7 days" +%m)
+THIS_MONTH=$(TZ=UTC date +%m)
 if [ "$NEXT_WEEK_MONTH" == "$THIS_MONTH" ]; then
-    echo "[$(date -Iseconds)] Not last Friday of month — skipping"
+    echo "[$(TZ=UTC date -Iseconds) UTC] Friday but not last of month — skipping"
     exit 0
 fi
 
-echo "[$(date -Iseconds)] LAST FRIDAY — running rebalance (mode=$SECTOR_MODE, nav=\$$SECTOR_NAV)"
+echo "[$(TZ=UTC date -Iseconds) UTC] LAST FRIDAY — running rebalance (mode=$SECTOR_MODE, nav=\$$SECTOR_NAV)"
 
 # ── Translate mode → CLI flag ──────────────────────────────────
 case "$SECTOR_MODE" in
