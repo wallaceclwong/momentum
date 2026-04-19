@@ -39,7 +39,9 @@ from backend.config import (
     USE_SECTOR_ABSOLUTE_MOMENTUM,
     SECTOR_ABS_MOM_THRESHOLD,
     USE_SECTOR_TREND_FILTER,
+    SECTOR_TREND_MODE,
     SECTOR_TREND_SMA_DAYS,
+    SECTOR_TREND_DUAL_CONFIRMATION,
     BACKTEST_SLIPPAGE,
     BACKTEST_COMMISSION_PER_SHARE,
     REGIME_MA_DAYS,
@@ -131,6 +133,76 @@ def get_rebalance_dates(start: datetime, end: datetime) -> List[datetime]:
 # ---------------------------------------------------------------------------
 # Backtest engine (daily NAV tracking, monthly rebalance)
 # ---------------------------------------------------------------------------
+def compute_trend_signal(
+    spy_series: pd.Series,
+    as_of: pd.Timestamp,
+    mode: str = "sma",
+    sma_days: int = 210,
+    dual_confirmation: bool = False,
+    monthly_history: Optional[pd.Series] = None,
+) -> float:
+    """
+    Compute binary trend signal: 1.0 (deploy) or 0.0 (cash).
+
+    Modes:
+      - "sma":         SPY > rolling SMA(sma_days)  → deploy
+      - "abs_mom_12m": SPY 12-month total return > 0  → deploy
+                      (Antonacci 2014 absolute-momentum rule)
+
+    If dual_confirmation=True (sma mode only), require TWO consecutive
+    month-ends with SPY < SMA before flipping to cash.  Reduces whipsaw.
+
+    Args:
+      spy_series:       Daily SPY price series (index datetime)
+      as_of:            Evaluation date (inclusive).
+      mode:             "sma" or "abs_mom_12m".
+      sma_days:         Lookback for SMA cross.
+      dual_confirmation: Apply 2-month confirmation on SMA signal.
+      monthly_history:  Optional precomputed monthly SPY series for efficiency.
+    """
+    spy_to_date = spy_series.loc[:as_of].dropna()
+
+    if mode == "abs_mom_12m":
+        # Antonacci-style: SPY 12-month total return must be positive.
+        # Use monthly price series if provided, else derive from daily.
+        if monthly_history is not None:
+            m = monthly_history.loc[:as_of].dropna()
+        else:
+            m = spy_to_date.resample("ME").last().dropna()
+        if len(m) < 13:
+            return 1.0  # insufficient history → default deploy
+        ret_12m = float(m.iloc[-1] / m.iloc[-13] - 1)
+        return 1.0 if ret_12m > 0 else 0.0
+
+    # SMA modes
+    if len(spy_to_date) < sma_days:
+        return 1.0  # insufficient history → default deploy
+
+    spy_now = float(spy_to_date.iloc[-1])
+    sma_now = float(spy_to_date.iloc[-sma_days:].mean())
+    below_now = spy_now < sma_now
+
+    if not dual_confirmation:
+        return 0.0 if below_now else 1.0
+
+    # Dual-confirmation: also check the signal at the PRIOR month-end.
+    # If the last month-end and current are both below SMA → cash.
+    if monthly_history is not None:
+        prior_me = monthly_history.index[monthly_history.index < as_of]
+        if len(prior_me) == 0:
+            return 0.0 if below_now else 1.0
+        prior_dt = prior_me[-1]
+        spy_prior_hist = spy_series.loc[:prior_dt].dropna()
+        if len(spy_prior_hist) < sma_days:
+            return 0.0 if below_now else 1.0
+        spy_prior = float(spy_prior_hist.iloc[-1])
+        sma_prior = float(spy_prior_hist.iloc[-sma_days:].mean())
+        below_prior = spy_prior < sma_prior
+        return 0.0 if (below_now and below_prior) else 1.0
+
+    return 0.0 if below_now else 1.0
+
+
 def run_sector_backtest(
     start_date: str,
     end_date: str,
@@ -141,7 +213,9 @@ def run_sector_backtest(
     apply_absolute_momentum: bool = USE_SECTOR_ABSOLUTE_MOMENTUM,
     abs_mom_threshold: float = SECTOR_ABS_MOM_THRESHOLD,
     apply_trend_filter: bool = USE_SECTOR_TREND_FILTER,
+    trend_mode: str = SECTOR_TREND_MODE,        # "abs_mom_12m" | "sma"
     trend_sma_days: int = SECTOR_TREND_SMA_DAYS,
+    trend_dual_confirmation: bool = SECTOR_TREND_DUAL_CONFIRMATION,
     slippage_bps: float = BACKTEST_SLIPPAGE,
 ) -> Dict:
     """
@@ -232,19 +306,23 @@ def run_sector_backtest(
                 absolute_threshold=abs_mom_threshold if apply_absolute_momentum else None,
             )
 
-            # ── Trend filter (Faber GTAA binary switch) ───────────────────
-            # If SPY below its SMA(N), go to cash regardless of momentum picks.
+            # ── Trend filter (binary cash / deploy master switch) ─────────
             deployment = 1.0
             regime_label = "N/A"
             if apply_trend_filter and "SPY" in prices.columns:
-                spy_to_date = prices["SPY"].loc[:dt].dropna()
-                if len(spy_to_date) >= trend_sma_days:
-                    spy_now = float(spy_to_date.iloc[-1])
-                    sma_now = float(spy_to_date.iloc[-trend_sma_days:].mean())
-                    if spy_now < sma_now:
-                        deployment = 0.0
-                        regime_label = "TREND_DOWN_CASH"
-                        top = []   # cash position
+                # precompute SPY monthly series once per call is cheap enough for dual-conf
+                spy_monthly = prices["SPY"].resample("ME").last()
+                signal = compute_trend_signal(
+                    prices["SPY"], dt,
+                    mode=trend_mode,
+                    sma_days=trend_sma_days,
+                    dual_confirmation=trend_dual_confirmation,
+                    monthly_history=spy_monthly,
+                )
+                if signal == 0.0:
+                    deployment = 0.0
+                    regime_label = f"TREND_CASH[{trend_mode}{'_dual' if trend_dual_confirmation else ''}]"
+                    top = []  # cash position
 
             # ── Regime filter (graduated 5-state — optional/off by default) ─
             if apply_regime and "SPY" in prices.columns:

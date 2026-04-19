@@ -205,15 +205,19 @@ USE_SECTOR_CRASH_PROTECTION  = False
 USE_SECTOR_ABSOLUTE_MOMENTUM = True
 SECTOR_ABS_MOM_THRESHOLD     = 0.0   # require own momentum > 0; set higher for stricter
 
-# Trend filter (Faber 2007 GTAA rule): binary master switch on SPY.
-# If SPY > its N-day SMA  → deploy 100% into top-K sector momentum picks
-# If SPY ≤ its N-day SMA  → go to cash
-# This is the classic "timing overlay" that cut the 2008 GFC drawdown from
-# ~−50% to ~−15% in the original Faber paper. Unlike the graduated 5-state
-# regime filter (which over-hedges sector rotation), this is a clean binary
-# signal that leaves full-deployment alone in normal markets.
-USE_SECTOR_TREND_FILTER   = True
-SECTOR_TREND_SMA_DAYS     = 210      # ~10 trading months (Faber default)
+# Trend filter: binary master switch — either deploy into top-K sectors, or cash.
+# Empirically-chosen mode after filter-variant comparison (Apr 2026):
+#   - "abs_mom_12m" (Antonacci 2014): SPY 12-month total return > 0 → deploy.
+#     Outperformed Faber 10/12-month SMA variants in TEST 2015-26 (10.4% vs 7.7-8.7%)
+#     and TRAIN 2000-14 (8.7% vs 6.8-7.5%) on both CAGR and drawdown.
+#     Protects against slow bears (2000-02, 2007-09, 2022) where 12-month
+#     returns stay negative for sustained periods. Does not protect against
+#     fast crashes (2020 COVID) but those recover within 6 months.
+#   - "sma": kept for reference / ablation.
+USE_SECTOR_TREND_FILTER       = True
+SECTOR_TREND_MODE             = "abs_mom_12m"   # "abs_mom_12m" | "sma"
+SECTOR_TREND_SMA_DAYS         = 210              # ~10 trading months (used only if mode="sma")
+SECTOR_TREND_DUAL_CONFIRMATION = False           # 2-month confirmation (sma mode)
 
 # Tax parameters for after-tax comparison (HK Non-Resident Alien)
 HK_NRA_DIVIDEND_WHT_US       = 0.30  # no US-HK treaty
