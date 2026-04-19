@@ -204,3 +204,21 @@ USE_SECTOR_CRASH_PROTECTION  = False
 # Cleanly handles bear markets (e.g. 2008 GFC, 2022) without double-hedging.
 USE_SECTOR_ABSOLUTE_MOMENTUM = True
 SECTOR_ABS_MOM_THRESHOLD     = 0.0   # require own momentum > 0; set higher for stricter
+
+# Trend filter (Faber 2007 GTAA rule): binary master switch on SPY.
+# If SPY > its N-day SMA  → deploy 100% into top-K sector momentum picks
+# If SPY ≤ its N-day SMA  → go to cash
+# This is the classic "timing overlay" that cut the 2008 GFC drawdown from
+# ~−50% to ~−15% in the original Faber paper. Unlike the graduated 5-state
+# regime filter (which over-hedges sector rotation), this is a clean binary
+# signal that leaves full-deployment alone in normal markets.
+USE_SECTOR_TREND_FILTER   = True
+SECTOR_TREND_SMA_DAYS     = 210      # ~10 trading months (Faber default)
+
+# Tax parameters for after-tax comparison (HK Non-Resident Alien)
+HK_NRA_DIVIDEND_WHT_US       = 0.30  # no US-HK treaty
+HK_NRA_DIVIDEND_WHT_UCITS    = 0.15  # Ireland-US treaty inside ETF
+HK_NRA_US_ESTATE_EXEMPTION   = 60_000.0  # USD
+HK_NRA_US_ESTATE_EFFECTIVE   = 0.30  # ~30% effective rate on amount > exemption
+SP500_AVG_DIVIDEND_YIELD     = 0.014  # for modelling WHT drag
+UCITS_EXTRA_TER              = 0.0006  # iShares UCITS ~6bps over SPDR XL*

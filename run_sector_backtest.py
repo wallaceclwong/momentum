@@ -26,8 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend.config import (
     SECTOR_BACKTEST_PROXIES, SECTOR_ROTATION_TOP_K,
     USE_SECTOR_REGIME_FILTER, USE_SECTOR_CRASH_PROTECTION, USE_SECTOR_ABSOLUTE_MOMENTUM,
+    USE_SECTOR_TREND_FILTER,
 )
-from backend.engine.sector_rotation import run_sector_backtest, run_sector_screener
+from backend.engine.sector_rotation import (
+    run_sector_backtest, run_sector_screener, apply_after_tax_adjustments,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("sector_bt")
@@ -89,7 +92,8 @@ def print_metrics_row(label: str, metrics: dict) -> None:
 
 
 def run_all_windows(apply_regime: bool, apply_crash: bool, top_k: int,
-                    apply_abs_mom: bool = True) -> None:
+                    apply_abs_mom: bool = True,
+                    apply_trend: bool = True) -> None:
     prices = load_prices("2000-01-01", datetime.today().strftime("%Y-%m-%d"))
     print(f"\nPrice data: {prices.shape[0]} days × {prices.shape[1]} tickers, "
           f"{prices.index.min().date()} -> {prices.index.max().date()}")
@@ -103,7 +107,8 @@ def run_all_windows(apply_regime: bool, apply_crash: bool, top_k: int,
         ("2020-01-01", "2024-12-31", "P5 2020-2024 (COVID+rally)"),
     ]
 
-    print(f"\nSettings: top_k={top_k}  regime={apply_regime}  crash={apply_crash}  abs_mom={apply_abs_mom}")
+    print(f"\nSettings: top_k={top_k}  trend={apply_trend}  regime={apply_regime}  "
+          f"crash={apply_crash}  abs_mom={apply_abs_mom}")
     print("═" * 100)
 
     results = {}
@@ -115,6 +120,7 @@ def run_all_windows(apply_regime: bool, apply_crash: bool, top_k: int,
                 apply_regime=apply_regime,
                 apply_crash_protection=apply_crash,
                 apply_absolute_momentum=apply_abs_mom,
+                apply_trend_filter=apply_trend,
             )
             print_metrics_row(label, r["metrics"])
             results[label] = r["metrics"]
@@ -132,6 +138,46 @@ def run_all_windows(apply_regime: bool, apply_crash: bool, top_k: int,
             print(f"  {t['label']:<40s}  CAGR={t['cagr']:>6.2%}  "
                   f"Sharpe={t['sharpe']:>5.2f}  MaxDD={t['max_drawdown']:>6.2%}  "
                   f"Vol={t.get('volatility',0):>5.2%}  NAV={t['final_nav']:>7.1f}")
+
+    # ── After-tax comparison for HK NRA holder ──────────────────────────
+    # Use the TEST period (2015-2026) as the fair-fight forward estimate.
+    test_sector_cagr = results.get("TEST  2015-2026", {}).get("cagr")
+    test_stock_cagr  = None
+    if oos_path.exists():
+        for t in json.loads(oos_path.read_text())["main_tests"]:
+            if "TEST" in t.get("label", "") and "cagr" in t:
+                test_stock_cagr = t["cagr"]
+
+    if test_sector_cagr is not None and test_stock_cagr is not None:
+        print("\n" + "═" * 100)
+        print("AFTER-TAX COMPARISON (HK NRA holder, $330K bucket 2, 15-year horizon)")
+        print("Based on TEST 2015-2026 pre-tax CAGRs. Estate tax = one-time hit at death.")
+        print("═" * 100)
+
+        for horizon in (10, 15, 20, 25):
+            print(f"\n  ── {horizon}-year horizon ──")
+            stock_adj  = apply_after_tax_adjustments(
+                test_stock_cagr,  "US_DIRECT", horizon_years=horizon,
+            )
+            ucits_adj  = apply_after_tax_adjustments(
+                test_sector_cagr, "UCITS",     horizon_years=horizon,
+            )
+            print(f"    33-stock US direct   pre-tax={stock_adj['pre_tax_cagr']:>6.2%}  "
+                  f"after-WHT={stock_adj['after_wht_cagr']:>6.2%}  "
+                  f"terminal_gross=${stock_adj['terminal_gross']:>10,.0f}  "
+                  f"estate_tax=${stock_adj['us_estate_tax']:>9,.0f}  "
+                  f"terminal_net=${stock_adj['terminal_net']:>10,.0f}  "
+                  f"→ eff_CAGR={stock_adj['effective_cagr_after_all_tax']:>6.2%}")
+            print(f"    UCITS sector rotation pre-tax={ucits_adj['pre_tax_cagr']:>6.2%}  "
+                  f"after-WHT={ucits_adj['after_wht_cagr']:>6.2%}  "
+                  f"terminal_gross=${ucits_adj['terminal_gross']:>10,.0f}  "
+                  f"estate_tax=${ucits_adj['us_estate_tax']:>9,.0f}  "
+                  f"terminal_net=${ucits_adj['terminal_net']:>10,.0f}  "
+                  f"→ eff_CAGR={ucits_adj['effective_cagr_after_all_tax']:>6.2%}")
+            gap_net = ucits_adj["terminal_net"] - stock_adj["terminal_net"]
+            gap_cagr = ucits_adj["effective_cagr_after_all_tax"] - stock_adj["effective_cagr_after_all_tax"]
+            print(f"    → UCITS advantage: +${gap_net:>10,.0f} terminal  "
+                  f"(+{gap_cagr:.2%}/yr effective)")
 
     # Current screener pick (today's top-3 sectors)
     print("\n── Today's sector screener pick (live UCITS tickers) ──────────────")
@@ -163,6 +209,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-abs-mom", dest="abs_mom", action="store_false",
                         help="Disable absolute-momentum filter (Faber dual-momentum)")
     parser.set_defaults(abs_mom=USE_SECTOR_ABSOLUTE_MOMENTUM)
+    parser.add_argument("--trend", dest="trend", action="store_true")
+    parser.add_argument("--no-trend", dest="trend", action="store_false",
+                        help="Disable SPY 10-month trend-filter master switch")
+    parser.set_defaults(trend=USE_SECTOR_TREND_FILTER)
     args = parser.parse_args()
 
     run_all_windows(
@@ -170,4 +220,5 @@ if __name__ == "__main__":
         apply_crash=args.crash,
         top_k=args.top_k,
         apply_abs_mom=args.abs_mom,
+        apply_trend=args.trend,
     )

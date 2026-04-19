@@ -38,6 +38,8 @@ from backend.config import (
     USE_SECTOR_CRASH_PROTECTION,
     USE_SECTOR_ABSOLUTE_MOMENTUM,
     SECTOR_ABS_MOM_THRESHOLD,
+    USE_SECTOR_TREND_FILTER,
+    SECTOR_TREND_SMA_DAYS,
     BACKTEST_SLIPPAGE,
     BACKTEST_COMMISSION_PER_SHARE,
     REGIME_MA_DAYS,
@@ -138,6 +140,8 @@ def run_sector_backtest(
     apply_crash_protection: bool = USE_SECTOR_CRASH_PROTECTION,
     apply_absolute_momentum: bool = USE_SECTOR_ABSOLUTE_MOMENTUM,
     abs_mom_threshold: float = SECTOR_ABS_MOM_THRESHOLD,
+    apply_trend_filter: bool = USE_SECTOR_TREND_FILTER,
+    trend_sma_days: int = SECTOR_TREND_SMA_DAYS,
     slippage_bps: float = BACKTEST_SLIPPAGE,
 ) -> Dict:
     """
@@ -228,9 +232,21 @@ def run_sector_backtest(
                 absolute_threshold=abs_mom_threshold if apply_absolute_momentum else None,
             )
 
-            # ── Regime filter ─────────────────────────────────────────────
+            # ── Trend filter (Faber GTAA binary switch) ───────────────────
+            # If SPY below its SMA(N), go to cash regardless of momentum picks.
             deployment = 1.0
             regime_label = "N/A"
+            if apply_trend_filter and "SPY" in prices.columns:
+                spy_to_date = prices["SPY"].loc[:dt].dropna()
+                if len(spy_to_date) >= trend_sma_days:
+                    spy_now = float(spy_to_date.iloc[-1])
+                    sma_now = float(spy_to_date.iloc[-trend_sma_days:].mean())
+                    if spy_now < sma_now:
+                        deployment = 0.0
+                        regime_label = "TREND_DOWN_CASH"
+                        top = []   # cash position
+
+            # ── Regime filter (graduated 5-state — optional/off by default) ─
             if apply_regime and "SPY" in prices.columns:
                 spy_to_date = prices["SPY"].loc[:dt].dropna()
                 if len(spy_to_date) >= REGIME_MA_DAYS:
@@ -331,6 +347,71 @@ def compute_metrics(nav: pd.Series, rf: float = 0.03) -> Dict:
         "max_drawdown": max_dd, "volatility": vol,
         "worst_1y": worst_1y, "final_nav": float(nav.iloc[-1]),
         "years": round(years, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# After-tax economics for HK Non-Resident Alien (NRA) investors
+# ---------------------------------------------------------------------------
+def apply_after_tax_adjustments(
+    pre_tax_cagr: float,
+    strategy_kind: str,                # "US_DIRECT" | "UCITS"
+    dividend_yield: float = 0.014,     # S&P 500 historical average
+    initial_capital: float = 330_000.0,
+    horizon_years: float = 15.0,
+    us_estate_exemption: float = 60_000.0,   # HK NRA threshold
+    us_estate_effective_rate: float = 0.30,  # effective rate on amount > threshold
+    us_direct_wht: float = 0.30,       # HK has NO US tax treaty
+    ucits_internal_wht: float = 0.15,  # Ireland-US treaty rate on dividends
+    ucits_ter_extra: float = 0.0006,   # iShares UCITS ~6bps over SPDR XL* TER
+) -> Dict:
+    """
+    Compute after-tax CAGR and terminal wealth for a strategy.
+
+    Model:
+      - US direct stocks: HK holder suffers 30% dividend WHT; on death any
+        US-situs holdings above $60K are taxed at ~18-40% federal estate tax
+        (effective ~30% above threshold).
+      - UCITS ETFs: dividends taxed at 15% inside the fund (Ireland-US treaty),
+        0% to HK holder. Ireland-domiciled = not US situs = no US estate tax.
+        Slightly higher TER (~6bps drag).
+
+    Returns dict with pre_tax_cagr, after_wht_cagr, terminal_gross,
+    us_estate_tax, terminal_net, effective_cagr_after_all.
+    """
+    if strategy_kind == "US_DIRECT":
+        wht_drag = dividend_yield * us_direct_wht
+        ter_drag = 0.0
+    elif strategy_kind == "UCITS":
+        wht_drag = dividend_yield * ucits_internal_wht
+        ter_drag = ucits_ter_extra
+    else:
+        raise ValueError(f"Unknown strategy_kind: {strategy_kind}")
+
+    after_wht_cagr = pre_tax_cagr - wht_drag - ter_drag
+    terminal_gross = initial_capital * ((1 + after_wht_cagr) ** horizon_years)
+
+    if strategy_kind == "US_DIRECT":
+        taxable_estate = max(0.0, terminal_gross - us_estate_exemption)
+        us_estate_tax = taxable_estate * us_estate_effective_rate
+    else:
+        us_estate_tax = 0.0
+
+    terminal_net = terminal_gross - us_estate_tax
+    effective_cagr = (terminal_net / initial_capital) ** (1 / horizon_years) - 1 if horizon_years > 0 else 0.0
+
+    return {
+        "strategy_kind":         strategy_kind,
+        "pre_tax_cagr":          float(pre_tax_cagr),
+        "dividend_wht_drag":     float(wht_drag),
+        "ter_drag":              float(ter_drag),
+        "after_wht_cagr":        float(after_wht_cagr),
+        "horizon_years":         float(horizon_years),
+        "initial_capital":       float(initial_capital),
+        "terminal_gross":        float(terminal_gross),
+        "us_estate_tax":         float(us_estate_tax),
+        "terminal_net":          float(terminal_net),
+        "effective_cagr_after_all_tax": float(effective_cagr),
     }
 
 
