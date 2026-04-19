@@ -68,6 +68,17 @@ def is_last_friday_of_month(d: Optional[date] = None) -> bool:
 
 
 def is_ibkr_live_enabled() -> bool:
+    """
+    Returns True if IBKR_LIVE=true is set in environment.
+
+    NOTE: despite the name, this flag controls whether we CONNECT to
+    IB Gateway at all — it does NOT distinguish paper-account from
+    live-real-money account. That distinction is determined by the
+    IB Gateway port (IBKR_PORT):
+        4001 = paper account
+        4002 = live-real-money account
+    So for paper-account trading set IBKR_LIVE=true AND IBKR_PORT=4001.
+    """
     return os.environ.get("IBKR_LIVE", "").lower() == "true"
 
 
@@ -125,8 +136,10 @@ def execute_via_ibkr(plan: RebalancePlan, delay_s: float = 0.5) -> Dict:
     """
     if not is_ibkr_live_enabled():
         raise RuntimeError(
-            "IBKR_LIVE is not set to 'true' in environment. "
-            "Refusing to place live orders. Set in .env and restart."
+            "IBKR_LIVE is not set to 'true' in environment — cannot connect "
+            "to IB Gateway. For paper-account testing: set IBKR_LIVE=true AND "
+            "IBKR_PORT=4001 in .env. For real money: IBKR_LIVE=true AND "
+            "IBKR_PORT=4002."
         )
     try:
         from ib_insync import Order, TagValue

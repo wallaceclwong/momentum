@@ -1,0 +1,16 @@
+[Unit]
+Description=Sector rotation monthly rebalance (Antonacci UCITS strategy)
+Wants=ib-gateway.service
+After=ib-gateway.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/momentum/.env.sector
+WorkingDirectory=/root/momentum
+ExecStart=/bin/bash /root/momentum/deploy/sector_rotation_run.sh
+StandardOutput=append:/var/log/sector-rotation.log
+StandardError=append:/var/log/sector-rotation.log
+
+# Don't restart automatically — monthly trigger only
+Restart=no
+TimeoutStartSec=600
