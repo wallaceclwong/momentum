@@ -2,11 +2,12 @@
 Description=Trigger sector rotation check every Friday afternoon
 
 [Timer]
-# Fires every Friday at 15:50 US/Eastern.
+# Fires every Friday at 15:00 UTC = 23:00 HKT (Fri night HK time).
+# Chosen to rebalance just before LSE UCITS close (~15:30 UTC in BST)
+# and early enough in HK that user is still awake to see results.
 # Script itself checks whether it's the LAST Friday of the month and
-# exits early otherwise.  Using wall-clock Fri 15:50 ET ~= Sat 03:50 HK.
-# Cron spec in UTC: 20:50 on Fridays (ET = UTC-5 standard, UTC-4 DST — use UTC to avoid DST drift)
-OnCalendar=Fri *-*-* 19:50:00 UTC
+# exits early otherwise.
+OnCalendar=Fri *-*-* 15:00:00 UTC
 Persistent=true
 Unit=sector-rotation.service
 
