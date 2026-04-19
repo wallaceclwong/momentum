@@ -83,6 +83,68 @@ def notify_error(context: str, error: str):
     send(msg)
 
 
+def notify_sector_rebalance(plan, mode: str, status: str = "executed"):
+    """
+    Send Telegram alert for a sector rotation rebalance.
+
+    plan: RebalancePlan dataclass from backend.engine.sector_executor
+    mode: "simulate" | "ibkr" | "dry_run"
+    status: "executed" | "planned" | "failed"
+    """
+    sig = plan.signal
+    emoji_status = {"executed": "✅", "planned": "👀", "failed": "🚨"}.get(status, "⚪")
+    mode_label   = {"simulate": "SIMULATE (DB only)",
+                    "ibkr": "IBKR LIVE",
+                    "dry_run": "DRY RUN"}.get(mode, mode.upper())
+
+    # ── Signal header ─────────────────────────────────────────────
+    trend_arrow = "↑" if sig.trend_value > 0 else "↓"
+    deploy_str  = "DEPLOY" if sig.deploy else "CASH (trend down)"
+    top_str     = ", ".join(sig.top_sectors) if sig.top_sectors else "—"
+
+    # ── Trade summary ─────────────────────────────────────────────
+    n = len(plan.trades)
+    if n == 0:
+        trade_block = "_No trades — portfolio at target_"
+    else:
+        lines = []
+        for t in plan.trades[:6]:   # max 6 to keep message compact
+            sign = "+" if t.action == "BUY" else "−"
+            lines.append(
+                f"`{t.action:<4} {t.ticker:<5} {sign}{abs(t.delta_shares):>7.1f}sh "
+                f"${t.est_price:>7.2f}  ${t.est_value_usd:>7,.0f}`"
+            )
+        if n > 6:
+            lines.append(f"_...+{n - 6} more_")
+        trade_block = "\n".join(lines)
+
+    msg = (
+        f"{emoji_status} *Sector Rotation Rebalance* — _{mode_label}_\n\n"
+        f"*Signal* (as of {sig.as_of.date()}):\n"
+        f"  SPY 12m: {trend_arrow} {sig.trend_value:+.2%} → *{deploy_str}*\n"
+        f"  Top-3: {top_str}\n\n"
+        f"*Trades* ({n}):\n{trade_block}\n\n"
+        f"*NAV:* ${plan.portfolio_nav:,.0f}  |  *Cost:* ${plan.estimated_cost:,.2f}  "
+        f"({plan.estimated_cost / max(plan.portfolio_nav, 1):.2%})\n"
+        f"Status: *{status}*"
+    )
+    send(msg)
+
+
+def notify_sector_signal(signal):
+    """Send Telegram alert for screener signal only (no rebalance)."""
+    trend_arrow = "↑" if signal.trend_value > 0 else "↓"
+    deploy_str  = "DEPLOY" if signal.deploy else "CASH (trend down)"
+    top_str     = ", ".join(signal.top_sectors) if signal.top_sectors else "—"
+    msg = (
+        f"📊 *Sector Rotation Signal*\n\n"
+        f"As of {signal.as_of.date()}  (month-end {signal.signal_date.date()})\n"
+        f"SPY 12m: {trend_arrow} {signal.trend_value:+.2%}  → *{deploy_str}*\n"
+        f"Top-3: {top_str}"
+    )
+    send(msg)
+
+
 def notify_startup(mode: str):
     msg = (
         f"*Momentum Scheduler Started*\n\n"

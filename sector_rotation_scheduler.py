@@ -48,6 +48,18 @@ from backend.engine.sector_executor import (
 from backend.ibkr.ucits_contracts import UCITS_CONTRACT_SPECS, TICKER_TO_SPEC
 from run_sector_backtest import load_prices
 
+# Telegram notifications (optional — silently no-ops if not configured)
+try:
+    from backend.notify.telegram import (
+        notify_sector_rebalance, notify_sector_signal, notify_error,
+    )
+    TELEGRAM_AVAILABLE = True
+except Exception:
+    TELEGRAM_AVAILABLE = False
+    def notify_sector_rebalance(*a, **kw): pass
+    def notify_sector_signal(*a, **kw): pass
+    def notify_error(*a, **kw): pass
+
 # ─── Logging ───────────────────────────────────────────────────────────────
 LOG_PATH = Path("data/sector_rotation_scheduler.log")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -257,6 +269,7 @@ def run_rebalance(nav: float, mode: str) -> RebalancePlan:
 
     if mode == "dry_run":
         logger.info("[REBAL] dry_run — no fills recorded")
+        notify_sector_rebalance(plan, mode="dry_run", status="planned")
         return plan
 
     if mode == "paper":
@@ -271,6 +284,7 @@ def run_rebalance(nav: float, mode: str) -> RebalancePlan:
         persist_rebalance(plan, mode="paper", signal_id=signal_id,
                           fills=fills, status="executed")
         logger.info(f"[REBAL] paper: simulated {len(fills)} fills")
+        notify_sector_rebalance(plan, mode="simulate", status="executed")
         return plan
 
     # mode == "live"
@@ -281,10 +295,12 @@ def run_rebalance(nav: float, mode: str) -> RebalancePlan:
         persist_rebalance(plan, mode="live", signal_id=signal_id,
                           fills=result["fills"], status="executed")
         logger.info(f"[REBAL] live: {len(result['fills'])} orders submitted")
+        notify_sector_rebalance(plan, mode="ibkr", status="executed")
     except Exception as e:
         persist_rebalance(plan, mode="live", signal_id=signal_id,
                           status="failed", error=str(e))
         logger.exception("[REBAL] live execution failed")
+        notify_error("sector_rotation live rebalance", str(e))
         raise
     return plan
 
@@ -319,6 +335,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("screener", help="Print today's signal only")
+    sub.add_parser("notify-test", help="Send a test Telegram message")
 
     p_plan = sub.add_parser("plan", help="Show rebalance plan, persist as dry_run")
     p_plan.add_argument("--nav", type=float, required=True,
@@ -343,6 +360,12 @@ def main() -> None:
 
     if args.cmd == "screener":
         run_screener()
+    elif args.cmd == "notify-test":
+        from backend.notify.telegram import send
+        ok = send("🧪 *Sector Rotation* — Telegram test message.\n\n"
+                  "If you see this, notifications are wired up and working. "
+                  "You'll get a full rebalance report each last Friday of the month.")
+        print("Telegram send result:", ok)
     elif args.cmd == "plan":
         run_plan(args.nav)
     elif args.cmd == "rebalance":
