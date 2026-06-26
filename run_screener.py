@@ -74,7 +74,7 @@ def print_results(portfolio: list, summary: dict):
         etf = picks[0].get("sector_etf", "N/A")
         sector_weight = picks[0].get("sector_weight", 0)
         
-        print(f"\n🔹 {sector_name} ({etf}) — Sector Weight: {sector_weight:.1f}%")
+        print(f"\n> {sector_name} ({etf}) — Sector Weight: {sector_weight:.1f}%")
         print("-" * 95)
         
         # Prepare table rows

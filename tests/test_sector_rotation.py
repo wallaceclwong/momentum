@@ -113,6 +113,15 @@ def test_rebalance_dates_are_last_fridays():
         from datetime import timedelta
         next_fri = d + timedelta(days=7)
         assert next_fri.month != d.month or next_fri > datetime(2024, 4, 30)
+def test_select_top_sectors_tech_cap():
+    """Ensure that the tech sector cap works correctly (XLK and XLC)."""
+    scores = pd.Series({"XLK": 0.25, "XLC": 0.20, "XLE": 0.15, "XLF": 0.10})
+    # If max_tech_sectors=1 and top_k=3, we should pick XLK (higher than XLC), skip XLC, and pick XLE, XLF
+    assert select_top_sectors(scores, top_k=3, max_tech_sectors=1) == ["XLK", "XLE", "XLF"]
+    # If no cap, we pick XLK, XLC, XLE
+    assert select_top_sectors(scores, top_k=3, max_tech_sectors=None) == ["XLK", "XLC", "XLE"]
+    # If cap is 2, we pick XLK, XLC, XLE
+    assert select_top_sectors(scores, top_k=3, max_tech_sectors=2) == ["XLK", "XLC", "XLE"]
 
 
 if __name__ == "__main__":
@@ -123,4 +132,9 @@ if __name__ == "__main__":
     print("top_k=3 abs>0:",            select_top_sectors(scores, top_k=3, absolute_threshold=0.0))
     print("weights top=[A,D]:",        build_target_weights(["A", "D"], ["A","B","C","D"]))
     print("weights empty (cash):",     build_target_weights([], ["A","B","C","D"]))
+    
+    # Run our new tech cap test
+    test_select_top_sectors_tech_cap()
+    print("test_select_top_sectors_tech_cap passed successfully.")
+    
     print("\nAll smoke tests passed.")

@@ -213,25 +213,44 @@ def calculate_momentum_for_tickers(
     price_data: Dict[str, pd.DataFrame],
     windows: Dict[str, int] = None,
     earnings_data: Optional[Dict[str, List]] = None,
+    ticker_to_sector: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Dict]:
     """
     Calculate momentum metrics for multiple tickers.
 
     Args:
-        price_data:    Dict of {ticker: OHLCV DataFrame}
-        windows:       Lookback windows (default from config)
-        earnings_data: Optional {ticker: [{surprise_pct, ...}]} from
-                       get_earnings_surprises_batch(). When supplied,
-                       L1 surprise is added as a continuous score bonus.
+        price_data:        Dict of {ticker: OHLCV DataFrame}. When residual
+                           momentum is enabled, price_data MUST include "SPY"
+                           and (optionally) the 11 sector ETFs.
+        windows:           Lookback windows (default from config)
+        earnings_data:     Optional {ticker: [{surprise_pct, ...}]} from
+                           get_earnings_surprises_batch(). When supplied,
+                           L1 surprise is added as a continuous score bonus.
+        ticker_to_sector:  Optional {ticker: sector name}. Required for
+                           sector-beta residualisation (Phase 5A).
 
     Returns:
         Dict of {ticker: {"returns": {...}, "composite_score": ...}}
     """
+    # ── Phase 5A: build residual-return price frames for signal calc ──
+    # Raw frames are kept for ADV / latest-price filters (need real volume).
+    from backend.config import USE_RESIDUAL_MOMENTUM
+    signal_price_data = price_data
+    if USE_RESIDUAL_MOMENTUM and ticker_to_sector:
+        try:
+            from backend.engine.residual_momentum import build_residual_price_frames
+            signal_price_data = build_residual_price_frames(
+                price_data, ticker_to_sector
+            )
+        except Exception as e:
+            logger.warning(f"[RESIDUAL] Build failed, using raw prices: {e}")
+            signal_price_data = price_data
+
     results = {}
 
     for ticker, df in price_data.items():
         try:
-            # ── Quality filters ────────────────────────────────────────
+            # ── Quality filters (use RAW price frame) ─────────────────
             latest_price = float(df["Close"].dropna().iloc[-1]) if not df.empty else 0
             if latest_price < MIN_STOCK_PRICE:
                 continue
@@ -241,9 +260,10 @@ def calculate_momentum_for_tickers(
                 logger.debug(f"[FILTER] {ticker} excluded: ADV ${adv:,.0f} < ${MIN_ADV_USD:,.0f}")
                 continue
 
-            # ── Signals ───────────────────────────────────────────────
-            returns = calculate_returns(df, windows)
-            returns["TREND_QUALITY"] = calculate_trend_quality(df)
+            # ── Signals (use residual frame if enabled) ───────────────
+            signal_df = signal_price_data.get(ticker, df)
+            returns = calculate_returns(signal_df, windows)
+            returns["TREND_QUALITY"] = calculate_trend_quality(signal_df)
 
             # Earnings surprise as continuous score (L1 surprise %, capped ±30)
             if earnings_data and ticker in earnings_data:

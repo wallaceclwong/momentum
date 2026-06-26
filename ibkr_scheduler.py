@@ -49,7 +49,9 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from backend.ibkr.gateway import connect, disconnect, get_ib, is_dry_run, IBKR_LIVE
-from backend.config import STOP_LOSS_PCT
+from backend.config import (
+    STOP_LOSS_PCT, IBKR_TARGET_CAPITAL, IBKR_MARGIN_BUFFER
+)
 from backend.ibkr.account import get_positions, get_cash_balance
 from backend.ibkr.trader import compute_rebalance_trades, execute_rebalance
 from backend.notify.telegram import (
@@ -62,7 +64,7 @@ from backend.engine.momentum import calculate_momentum_for_tickers
 from backend.data.prices import fetch_price_history
 from backend.engine.paper_trading import record_rebalance
 
-VIRTUAL_CAPITAL = 100_000.0   # used in dry-run mode
+VIRTUAL_CAPITAL = IBKR_TARGET_CAPITAL
 _PEAK_NAV       = VIRTUAL_CAPITAL
 
 
@@ -92,7 +94,11 @@ def get_target_weights(deployment: float = 1.0) -> dict:
     sector_weights = get_sector_etf_weights()
     all_tickers = list(ticker_to_sector.keys())
 
-    price_data = fetch_price_history(all_tickers, period="13mo", interval="1d")
+    # Phase 5A: include SPY + sector ETFs for residual-momentum regression
+    from backend.config import SECTORS as _SECTORS_MAP
+    extra_tickers = ["SPY"] + list(_SECTORS_MAP.keys())
+    fetch_tickers = list(set(all_tickers) | set(extra_tickers))
+    price_data = fetch_price_history(fetch_tickers, period="13mo", interval="1d")
 
     earnings_data = {}
     if USE_EARNINGS_IN_SCREENER:
@@ -103,7 +109,11 @@ def get_target_weights(deployment: float = 1.0) -> dict:
         except Exception as e:
             logger.warning(f"[SCREENER] Earnings fetch failed, continuing without: {e}")
 
-    momentum_data = calculate_momentum_for_tickers(price_data, earnings_data=earnings_data or None)
+    momentum_data = calculate_momentum_for_tickers(
+        price_data,
+        earnings_data=earnings_data or None,
+        ticker_to_sector=ticker_to_sector,
+    )
 
     # NOTE: crash protection is applied in job_monthly_rebalance() AFTER
     # connecting and fetching live positions — not here, to avoid requiring
@@ -249,8 +259,23 @@ def job_monthly_rebalance(dry_run: bool = False, force: bool = False):
     # ── Get current state ──────────────────────────────────────
     try:
         current_positions = get_positions()
-        portfolio_value   = get_cash_balance() if not (dry_run or is_dry_run()) else VIRTUAL_CAPITAL
-        logger.info(f"[ACCOUNT] {len(current_positions)} positions, portfolio value ${portfolio_value:,.0f}")
+        
+        if not (dry_run or is_dry_run()):
+            actual_balance = get_cash_balance()
+            # Use all available funds up to the target limit
+            capped_balance = min(actual_balance, IBKR_TARGET_CAPITAL)
+            # Apply 5% cash buffer to prevent margin rejections
+            portfolio_value = capped_balance * (1 - IBKR_MARGIN_BUFFER)
+            
+            logger.info(
+                f"[ACCOUNT] {len(current_positions)} positions, "
+                f"net liq ${actual_balance:,.0f}, "
+                f"using ${portfolio_value:,.0f} (capped at ${IBKR_TARGET_CAPITAL:,.0f} with {IBKR_MARGIN_BUFFER*100:.0f}% buffer)"
+            )
+        else:
+            portfolio_value = VIRTUAL_CAPITAL
+            logger.info(f"[ACCOUNT] Dry-run: using virtual capital ${portfolio_value:,.0f}")
+            
     except Exception as e:
         logger.error(f"[ERROR] Failed to fetch account state: {e}")
         notify_error("Account fetch", str(e))

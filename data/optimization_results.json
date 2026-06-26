@@ -1,0 +1,242 @@
+[
+  {
+    "universe": "Baseline",
+    "exit": "abs_mom_12m",
+    "bt_metrics": {
+      "cagr": 0.11194805732785329,
+      "volatility": 0.1638847543105351,
+      "sharpe": 0.5000346595545733,
+      "max_drawdown": -0.30199176008261475
+    },
+    "comb_metrics": {
+      "cagr": 0.2790814228473506,
+      "volatility": 0.22398843444917566,
+      "sharpe": 1.1120280538585965,
+      "max_drawdown": -0.36646018395293845
+    }
+  },
+  {
+    "universe": "Baseline",
+    "exit": "abs_mom_6m",
+    "bt_metrics": {
+      "cagr": 0.09346575456139528,
+      "volatility": 0.15995093547062283,
+      "sharpe": 0.39678264071829467,
+      "max_drawdown": -0.3019917600826152
+    },
+    "comb_metrics": {
+      "cagr": 0.27201180007726533,
+      "volatility": 0.22115804212644555,
+      "sharpe": 1.0942934643041233,
+      "max_drawdown": -0.3391257492487888
+    }
+  },
+  {
+    "universe": "Baseline",
+    "exit": "abs_mom_3m",
+    "bt_metrics": {
+      "cagr": 0.060637157022972676,
+      "volatility": 0.1463865888377145,
+      "sharpe": 0.20928937046915758,
+      "max_drawdown": -0.3019917600826152
+    },
+    "comb_metrics": {
+      "cagr": 0.25921571856021597,
+      "volatility": 0.2144580786841434,
+      "sharpe": 1.0688136346582113,
+      "max_drawdown": -0.37925937625642625
+    }
+  },
+  {
+    "universe": "Baseline",
+    "exit": "sma_100",
+    "bt_metrics": {
+      "cagr": 0.08524152888981251,
+      "volatility": 0.12419110971461018,
+      "sharpe": 0.4448106552615316,
+      "max_drawdown": -0.16617306169242863
+    },
+    "comb_metrics": {
+      "cagr": 0.27043895915986726,
+      "volatility": 0.20604100901867461,
+      "sharpe": 1.1669471058456862,
+      "max_drawdown": -0.3325507450795636
+    }
+  },
+  {
+    "universe": "Baseline",
+    "exit": "sma_50",
+    "bt_metrics": {
+      "cagr": 0.08313774996006829,
+      "volatility": 0.12123020236656909,
+      "sharpe": 0.4383210530276386,
+      "max_drawdown": -0.188538250913031
+    },
+    "comb_metrics": {
+      "cagr": 0.2697322760737708,
+      "volatility": 0.20477233256862964,
+      "sharpe": 1.1707259133429284,
+      "max_drawdown": -0.36193797547134543
+    }
+  },
+  {
+    "universe": "Exclude Tech",
+    "exit": "abs_mom_12m",
+    "bt_metrics": {
+      "cagr": 0.08097872904351333,
+      "volatility": 0.15763572691851171,
+      "sharpe": 0.32339578114716533,
+      "max_drawdown": -0.3546659094558958
+    },
+    "comb_metrics": {
+      "cagr": 0.2679165480726109,
+      "volatility": 0.21667335364747567,
+      "sharpe": 1.098042486847264,
+      "max_drawdown": -0.3433833111368325
+    }
+  },
+  {
+    "universe": "Exclude Tech",
+    "exit": "abs_mom_6m",
+    "bt_metrics": {
+      "cagr": 0.06707785313788484,
+      "volatility": 0.15413862208271206,
+      "sharpe": 0.24054875174625964,
+      "max_drawdown": -0.348169730343617
+    },
+    "comb_metrics": {
+      "cagr": 0.2624854257207727,
+      "volatility": 0.2143890933351002,
+      "sharpe": 1.0844088293119796,
+      "max_drawdown": -0.3264747711233277
+    }
+  },
+  {
+    "universe": "Exclude Tech",
+    "exit": "abs_mom_3m",
+    "bt_metrics": {
+      "cagr": 0.04086087686675732,
+      "volatility": 0.1399562339711698,
+      "sharpe": 0.07760195139999697,
+      "max_drawdown": -0.344913312741307
+    },
+    "comb_metrics": {
+      "cagr": 0.2521395398437478,
+      "volatility": 0.20797133652494132,
+      "sharpe": 1.0681257501901342,
+      "max_drawdown": -0.37164354434378166
+    }
+  },
+  {
+    "universe": "Exclude Tech",
+    "exit": "sma_100",
+    "bt_metrics": {
+      "cagr": 0.07564921301324246,
+      "volatility": 0.11681432983538081,
+      "sharpe": 0.3907843590557174,
+      "max_drawdown": -0.17157783909667157
+    },
+    "comb_metrics": {
+      "cagr": 0.26763286826594124,
+      "volatility": 0.19985288641735383,
+      "sharpe": 1.1890389602364375,
+      "max_drawdown": -0.311774208936056
+    }
+  },
+  {
+    "universe": "Exclude Tech",
+    "exit": "sma_50",
+    "bt_metrics": {
+      "cagr": 0.07195264326858752,
+      "volatility": 0.11520161784524663,
+      "sharpe": 0.3641671363065718,
+      "max_drawdown": -0.17543166227439455
+    },
+    "comb_metrics": {
+      "cagr": 0.2662158712431839,
+      "volatility": 0.19900153164246048,
+      "sharpe": 1.1870052923390821,
+      "max_drawdown": -0.34207621277299416
+    }
+  },
+  {
+    "universe": "Cap Tech at 1",
+    "exit": "abs_mom_12m",
+    "bt_metrics": {
+      "cagr": 0.10457039401466361,
+      "volatility": 0.16078372500577204,
+      "sharpe": 0.46379317317089513,
+      "max_drawdown": -0.30199176008261475
+    },
+    "comb_metrics": {
+      "cagr": 0.27641255058543357,
+      "volatility": 0.2219565319814526,
+      "sharpe": 1.1101838201636012,
+      "max_drawdown": -0.3664601839529379
+    }
+  },
+  {
+    "universe": "Cap Tech at 1",
+    "exit": "abs_mom_6m",
+    "bt_metrics": {
+      "cagr": 0.08529387581044534,
+      "volatility": 0.15709158267579015,
+      "sharpe": 0.35198496869537776,
+      "max_drawdown": -0.3019917600826152
+    },
+    "comb_metrics": {
+      "cagr": 0.26894647917581604,
+      "volatility": 0.219293114107407,
+      "sharpe": 1.0896214418241288,
+      "max_drawdown": -0.3391257492487896
+    }
+  },
+  {
+    "universe": "Cap Tech at 1",
+    "exit": "abs_mom_3m",
+    "bt_metrics": {
+      "cagr": 0.057069336534516735,
+      "volatility": 0.14294921937092234,
+      "sharpe": 0.18936330435130014,
+      "max_drawdown": -0.3019917600826152
+    },
+    "comb_metrics": {
+      "cagr": 0.2580337523397376,
+      "volatility": 0.21242644300825686,
+      "sharpe": 1.0734715937924644,
+      "max_drawdown": -0.37925937625642636
+    }
+  },
+  {
+    "universe": "Cap Tech at 1",
+    "exit": "sma_100",
+    "bt_metrics": {
+      "cagr": 0.0880098992644689,
+      "volatility": 0.12130906556246203,
+      "sharpe": 0.47819920956030776,
+      "max_drawdown": -0.16617306169242863
+    },
+    "comb_metrics": {
+      "cagr": 0.2718615759908076,
+      "volatility": 0.20437712795871815,
+      "sharpe": 1.18340823362417,
+      "max_drawdown": -0.33255074507956317
+    }
+  },
+  {
+    "universe": "Cap Tech at 1",
+    "exit": "sma_50",
+    "bt_metrics": {
+      "cagr": 0.08523417722811133,
+      "volatility": 0.11812535696966778,
+      "sharpe": 0.4675895052938918,
+      "max_drawdown": -0.18853825091303034
+    },
+    "comb_metrics": {
+      "cagr": 0.2708729175273634,
+      "volatility": 0.20308089223483364,
+      "sharpe": 1.1860934570290778,
+      "max_drawdown": -0.3619379754713442
+    }
+  }
+]

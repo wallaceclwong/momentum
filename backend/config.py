@@ -147,7 +147,7 @@ REGIME_DOWNGRADE_PER_FLAG  = 0.10  # reduce deployment by 10% per failing signal
 BACKTEST_SLIPPAGE = 0.0005           # 5bps per side (institutional estimate)
 BACKTEST_COMMISSION_PER_SHARE = 0.005
 # IBKR Execution Settings
-IBKR_TARGET_CAPITAL = 132_000.0      # Maximum capital to allocate
+IBKR_TARGET_CAPITAL = 330_000.0      # Maximum capital to allocate
 IBKR_MARGIN_BUFFER  = 0.05           # Keep 5% cash to prevent margin rejections
 IBKR_ORDER_STRATEGY = "ADAPTIVE"     # "ADAPTIVE" or "MARKET"
 IBKR_ADAPTIVE_PRIORITY = "Urgent"    # "Patient", "Normal", "Urgent"
@@ -215,9 +215,14 @@ SECTOR_ABS_MOM_THRESHOLD     = 0.0   # require own momentum > 0; set higher for 
 #     fast crashes (2020 COVID) but those recover within 6 months.
 #   - "sma": kept for reference / ablation.
 USE_SECTOR_TREND_FILTER       = True
-SECTOR_TREND_MODE             = "abs_mom_12m"   # "abs_mom_12m" | "sma"
-SECTOR_TREND_SMA_DAYS         = 210              # ~10 trading months (used only if mode="sma")
+SECTOR_TREND_MODE             = "sma"            # Updated to "sma" (100-day) after May 2026 optimizations backtest
+SECTOR_TREND_SMA_DAYS         = 100              # ~5 trading months (reduced from 210 to 100 for accelerated crash exits)
 SECTOR_TREND_DUAL_CONFIRMATION = False           # 2-month confirmation (sma mode)
+
+# Cap on technology-related sectors inside Bucket 2 (Information Technology + Communication Services)
+# Keeps sector momentum diversified and prevents high-correlation overlap with Bucket 3 (Mag-7).
+# Set to 1 to allow at most ONE tech sector in top-3; set to None or 2 to disable capping.
+SECTOR_ROTATION_MAX_TECH_SECTORS = 1
 
 # Tax parameters for after-tax comparison (HK Non-Resident Alien)
 HK_NRA_DIVIDEND_WHT_US       = 0.30  # no US-HK treaty

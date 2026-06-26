@@ -13,6 +13,10 @@ Set env vars in .env before enabling live mode:
 import os
 import logging
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load credentials from .env
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 

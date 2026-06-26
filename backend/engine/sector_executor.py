@@ -33,6 +33,7 @@ from backend.config import (
     SECTOR_TREND_DUAL_CONFIRMATION,
     USE_SECTOR_ABSOLUTE_MOMENTUM,
     SECTOR_ABS_MOM_THRESHOLD,
+    SECTOR_ROTATION_MAX_TECH_SECTORS,
 )
 from backend.engine.sector_rotation import (
     compute_sector_momentum,
@@ -169,6 +170,7 @@ def generate_signal(
         top_proxy = select_top_sectors(
             mom, top_k=top_k,
             absolute_threshold=SECTOR_ABS_MOM_THRESHOLD if USE_SECTOR_ABSOLUTE_MOMENTUM else None,
+            max_tech_sectors=SECTOR_ROTATION_MAX_TECH_SECTORS,
         )
         top_sectors = [proxy_to_sector[t] for t in top_proxy]
 

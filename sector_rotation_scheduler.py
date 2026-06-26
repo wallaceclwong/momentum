@@ -169,6 +169,8 @@ def execute_via_ibkr(plan: RebalancePlan, delay_s: float = 0.5) -> Dict:
             raise RuntimeError("IBKR not connected after connect()")
 
         fills: List[Dict] = []
+        MAX_SHARES_PER_ORDER = 499
+        
         # Sells first, then buys (free up cash before deploying)
         ordered = sorted(plan.trades, key=lambda t: 0 if t.action == "SELL" else 1)
         for t in ordered:
@@ -176,27 +178,38 @@ def execute_via_ibkr(plan: RebalancePlan, delay_s: float = 0.5) -> Dict:
                 contract = build_ibkr_contract(t.ticker)
                 ib.qualifyContracts(contract)
 
-                order = Order()
-                order.action        = t.action
-                order.totalQuantity = max(1, round(abs(t.delta_shares)))
-                order.tif           = "DAY"
-                order.orderType     = "MKT"
-                order.algoStrategy  = "Adaptive"
-                order.algoParams    = [TagValue("adaptivePriority", IBKR_ADAPTIVE_PRIORITY)]
+                total_qty = max(1, round(abs(t.delta_shares)))
+                # Split into chunks to stay under the 500 share precautionary limit
+                chunks = [MAX_SHARES_PER_ORDER] * (total_qty // MAX_SHARES_PER_ORDER)
+                if total_qty % MAX_SHARES_PER_ORDER > 0:
+                    chunks.append(total_qty % MAX_SHARES_PER_ORDER)
 
-                trade = ib.placeOrder(contract, order)
-                fill_info = {
-                    "ticker":       t.ticker,
-                    "action":       t.action,
-                    "shares":       order.totalQuantity,
-                    "order_id":     trade.order.orderId,
-                    "est_price":    t.est_price,
-                    "est_value":    t.est_value_usd,
-                    "status":       "submitted",
-                }
-                logger.info(f"[IBKR] {t.action} {order.totalQuantity} {t.ticker} (LSE UCITS) orderId={trade.order.orderId}")
-                fills.append(fill_info)
-                time.sleep(delay_s)
+                for qty in chunks:
+                    order = Order()
+                    order.action        = t.action
+                    order.totalQuantity = qty
+                    order.tif           = "GTC"
+                    order.orderType     = "MKT"
+
+                    trade = ib.placeOrder(contract, order)
+                    
+                    # Wait for order to be acknowledged/submitted
+                    timeout = time.time() + 10
+                    while trade.orderStatus.status in ('PendingSubmit', 'PreSubmitted') and time.time() < timeout:
+                        ib.sleep(0.5)
+
+                    fill_info = {
+                        "ticker":       t.ticker,
+                        "action":       t.action,
+                        "shares":       qty,
+                        "order_id":     trade.order.orderId,
+                        "est_price":    t.est_price,
+                        "est_value":    t.est_price * qty,
+                        "status":       trade.orderStatus.status,
+                    }
+                    logger.info(f"[IBKR] {t.action} {qty} {t.ticker} status={trade.orderStatus.status} orderId={trade.order.orderId}")
+                    fills.append(fill_info)
+                    time.sleep(delay_s)
             except Exception as e:
                 logger.error(f"[IBKR] Order failed: {t.action} {t.ticker}: {e}")
                 fills.append({
@@ -225,19 +238,21 @@ def run_plan(nav: float, use_last_paper: bool = True) -> RebalancePlan:
     sig = generate_signal(prices)
     print_signal(sig)
 
-    # Price lookup from latest row
-    latest = prices.iloc[-1]
-    # For UCITS tickers we need prices — use US SPDR proxies as price proxy
-    # (acceptable only for dry-run/planning; in live mode IBKR will use real UCITS prices)
-    sector_for_ticker = {spec["symbol"]: sector for sector, spec in UCITS_CONTRACT_SPECS.items()}
-    proxy_for_sector = {sector: sector_to_proxy(sector) for sector in UCITS_CONTRACT_SPECS.keys()}
-    price_lookup = {}
-    for ucits_tk, sector in sector_for_ticker.items():
-        proxy = proxy_for_sector[sector]
-        if proxy in prices.columns and not pd.isna(latest.get(proxy)):
-            price_lookup[ucits_tk] = float(latest[proxy])
-
+    # Fetch REAL UCITS prices from Yahoo Finance (not proxy prices)
+    from backend.data.ucits_prices import get_ucits_price_lookup
+    
     positions = get_last_paper_positions() if use_last_paper else {}
+    signal_tickers = list(sig.target_weights.keys())
+    current_tickers = list(positions.keys())
+    
+    price_lookup = get_ucits_price_lookup(signal_tickers, current_tickers)
+    
+    if not price_lookup:
+        logger.error("[PLAN] Failed to fetch UCITS prices — cannot compute trades")
+        raise RuntimeError("No UCITS prices available")
+    
+    logger.info(f"[PLAN] Fetched {len(price_lookup)} UCITS prices: {price_lookup}")
+    
     plan = compute_trades(sig, positions, portfolio_nav=nav, price_lookup=price_lookup)
     print_plan(plan)
 
@@ -245,11 +260,6 @@ def run_plan(nav: float, use_last_paper: bool = True) -> RebalancePlan:
     persist_rebalance(plan, mode="dry_run", signal_id=signal_id, status="planned")
     logger.info(f"[PLAN] saved signal_id={signal_id}, mode=dry_run, trades={len(plan.trades)}")
     return plan
-
-
-def sector_to_proxy(sector: str) -> str:
-    from backend.config import SECTOR_BACKTEST_PROXIES
-    return SECTOR_BACKTEST_PROXIES[sector]
 
 
 def run_rebalance(nav: float, mode: str) -> RebalancePlan:

@@ -18,6 +18,9 @@ from backend.config import (
     REGIME_VIX_HIGH, REGIME_VIX_EXTREME,
     REGIME_STRONG_BULL, REGIME_BULL, REGIME_VOLATILE_BULL,
     REGIME_BEAR, REGIME_CRISIS,
+    USE_ENHANCED_REGIME,
+    REGIME_BREADTH_MA_DAYS, REGIME_CREDIT_MA_DAYS,
+    REGIME_DOWNGRADE_PER_FLAG,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,72 @@ def _fetch_vix() -> Optional[float]:
     except Exception as e:
         logger.warning(f"[REGIME] VIX fetch failed: {e}")
         return None
+
+
+def _fetch_close_series(ticker: str, period: str = "6mo") -> Optional[pd.Series]:
+    """Fetch daily Close series for a single ticker."""
+    try:
+        raw = yf.download(ticker, period=period, interval="1d",
+                          progress=False, auto_adjust=True)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            # Extract Close level, then the single ticker column
+            close = raw["Close"]
+            if hasattr(close, "columns") and ticker in close.columns:
+                close = close[ticker]
+            else:
+                close = close.iloc[:, 0]
+        else:
+            close = raw["Close"]
+        return close.astype(float).dropna()
+    except Exception as e:
+        logger.warning(f"[REGIME] {ticker} fetch failed: {e}")
+        return None
+
+
+def _check_breadth(ma_days: int = None) -> Optional[bool]:
+    """
+    Breadth signal: RSP / SPY ratio above its N-day MA means equal-weight is
+    keeping up with cap-weight (broad participation) — healthy.  Below MA
+    means rally is narrowing (megacap concentration) — risk-off flag.
+
+    Returns True if breadth is healthy, False if deteriorating, None if unavailable.
+    """
+    ma_days = ma_days or REGIME_BREADTH_MA_DAYS
+    rsp = _fetch_close_series("RSP")
+    spy = _fetch_close_series("SPY")
+    if rsp is None or spy is None or len(rsp) < ma_days or len(spy) < ma_days:
+        return None
+    common = rsp.index.intersection(spy.index)
+    ratio = (rsp.loc[common] / spy.loc[common]).dropna()
+    if len(ratio) < ma_days:
+        return None
+    ratio_now = float(ratio.iloc[-1])
+    ratio_ma  = float(ratio.iloc[-ma_days:].mean())
+    return ratio_now >= ratio_ma
+
+
+def _check_credit(ma_days: int = None) -> Optional[bool]:
+    """
+    Credit signal: HYG / LQD ratio above its N-day MA means high-yield is
+    outperforming investment-grade — credit markets are risk-on.  Below MA
+    means credit stress — risk-off flag.
+
+    Returns True if credit is healthy, False if stressed, None if unavailable.
+    """
+    ma_days = ma_days or REGIME_CREDIT_MA_DAYS
+    hyg = _fetch_close_series("HYG")
+    lqd = _fetch_close_series("LQD")
+    if hyg is None or lqd is None or len(hyg) < ma_days or len(lqd) < ma_days:
+        return None
+    common = hyg.index.intersection(lqd.index)
+    ratio = (hyg.loc[common] / lqd.loc[common]).dropna()
+    if len(ratio) < ma_days:
+        return None
+    ratio_now = float(ratio.iloc[-1])
+    ratio_ma  = float(ratio.iloc[-ma_days:].mean())
+    return ratio_now >= ratio_ma
 
 
 def get_regime(
@@ -92,20 +161,46 @@ def get_regime(
         label, deployment = _classify(spy_price, ma50, ma200, vix)
         bullish = spy_price >= ma200
 
+        # ── Phase 5A: enhanced regime with breadth + credit ─────────────
+        # Applied only in live mode (not backtest where prices is pre-loaded)
+        # to avoid slow/non-PIT yfinance fetches mid-backtest.
+        breadth_ok: Optional[bool] = None
+        credit_ok:  Optional[bool] = None
+        downgrade = 0.0
+        if USE_ENHANCED_REGIME and prices is None:
+            breadth_ok = _check_breadth()
+            credit_ok  = _check_credit()
+            if breadth_ok is False:
+                downgrade += REGIME_DOWNGRADE_PER_FLAG
+            if credit_ok is False:
+                downgrade += REGIME_DOWNGRADE_PER_FLAG
+
+        final_deployment = max(0.0, deployment - downgrade)
+
         vix_str = f"{vix:.1f}" if vix else "N/A"
+        flags = []
+        if breadth_ok is not None:
+            flags.append(f"breadth={'OK' if breadth_ok else 'WEAK'}")
+        if credit_ok is not None:
+            flags.append(f"credit={'OK' if credit_ok else 'WEAK'}")
+        flag_str = f"  [{', '.join(flags)}]" if flags else ""
         logger.info(
             f"[REGIME] {label}  SPY={spy_price:.2f}  MA50={ma50:.2f}  "
-            f"MA200={ma200:.2f}  VIX={vix_str}  deploy={deployment:.0%}"
+            f"MA200={ma200:.2f}  VIX={vix_str}{flag_str}  "
+            f"deploy={final_deployment:.0%} (base {deployment:.0%}, -{downgrade:.0%})"
         )
 
         return {
-            "label":      label,
-            "bullish":    bullish,
-            "spy_price":  round(spy_price, 2),
-            "spy_ma50":   round(ma50, 2),
-            "spy_ma200":  round(ma200, 2),
-            "vix":        round(vix, 2) if vix else None,
-            "deployment": deployment,
+            "label":       label,
+            "bullish":     bullish,
+            "spy_price":   round(spy_price, 2),
+            "spy_ma50":    round(ma50, 2),
+            "spy_ma200":   round(ma200, 2),
+            "vix":         round(vix, 2) if vix else None,
+            "breadth_ok":  breadth_ok,
+            "credit_ok":   credit_ok,
+            "deployment":  final_deployment,
+            "deploy_base": deployment,
         }
 
     except Exception as e:

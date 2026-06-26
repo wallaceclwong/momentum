@@ -96,24 +96,48 @@ def get_last_n_earnings_surprises(ticker: str, n: int = 2) -> List[Dict]:
 def get_earnings_surprises_batch(tickers: List[str], n: int = 2) -> Dict[str, List[Dict]]:
     """
     Fetch earnings surprises for multiple tickers.
-    
+
+    Source priority:
+      1. Finnhub (if FINNHUB_API_KEY env var is set) — more reliable for EPS
+         surprise history; free tier gives 60 req/min, unlimited total.
+      2. yfinance fallback — only used for tickers Finnhub didn't cover
+         (or when no Finnhub key configured).
+
     Args:
         tickers: List of ticker symbols
         n: Number of earnings reports per ticker
-    
+
     Returns:
         Dict mapping ticker -> list of earnings surprise data
     """
-    results = {}
-    for ticker in tickers:
-        try:
-            surprises = get_last_n_earnings_surprises(ticker, n)
-            if surprises:
-                results[ticker] = surprises
-        except Exception as e:
-            logger.warning(f"Failed to get earnings for {ticker}: {e}")
-    
-    logger.info(f"Fetched earnings data for {len(results)}/{len(tickers)} tickers")
+    from backend.data.earnings_finnhub import (
+        fetch_earnings_finnhub_batch, is_finnhub_configured,
+    )
+
+    results: Dict[str, List[Dict]] = {}
+
+    # ── Primary source: Finnhub ──────────────────────────────────────
+    if is_finnhub_configured():
+        logger.info(f"[EARNINGS] Using Finnhub for {len(tickers)} tickers (~{len(tickers)//60+1}min)")
+        results = fetch_earnings_finnhub_batch(tickers, n=n)
+    else:
+        logger.info("[EARNINGS] FINNHUB_API_KEY not set — using yfinance only")
+
+    # ── Fallback: yfinance for whatever Finnhub missed ───────────────
+    missing = [t for t in tickers if t not in results]
+    if missing:
+        logger.info(f"[EARNINGS] yfinance fallback for {len(missing)} tickers")
+        for ticker in missing:
+            try:
+                surprises = get_last_n_earnings_surprises(ticker, n)
+                if surprises:
+                    results[ticker] = surprises
+            except Exception as e:
+                logger.debug(f"yfinance earnings failed for {ticker}: {e}")
+
+    logger.info(
+        f"[EARNINGS] Final coverage: {len(results)}/{len(tickers)} tickers"
+    )
     return results
 
 

@@ -33,12 +33,18 @@ def compute_rebalance_trades(
     Returns:
         (buys, sells) — each is a list of trade dicts
     """
+    from backend.config import (
+        USE_DRIFT_THRESHOLD,
+        REBALANCE_DRIFT_THRESHOLD,
+    )
+
     current = {p["ticker"]: p for p in current_positions if p.get("ticker")}
 
     buys: List[Dict] = []
     sells: List[Dict] = []
+    skipped_drift = 0
 
-    # Positions to close entirely (not in new target)
+    # Positions to close entirely (not in new target) — always execute fully
     for ticker, pos in current.items():
         if ticker not in target_weights:
             sells.append({
@@ -55,7 +61,20 @@ def compute_rebalance_trades(
         diff_value    = target_value - current_value
 
         if abs(diff_value) < MIN_TRADE_VALUE:
-            continue  # skip tiny adjustments
+            continue  # skip tiny dollar adjustments
+
+        # Phase 5A: drift-threshold partial rebalancing
+        # Skip trades where position is already within DRIFT_THRESHOLD of target.
+        # New positions (current_value == 0) always trade.
+        if USE_DRIFT_THRESHOLD and current_value > 0 and target_value > 0:
+            drift = abs(diff_value) / target_value
+            if drift < REBALANCE_DRIFT_THRESHOLD:
+                skipped_drift += 1
+                logger.debug(
+                    f"[DRIFT] {ticker}: drift {drift:.1%} < "
+                    f"{REBALANCE_DRIFT_THRESHOLD:.0%} — skipping rebalance"
+                )
+                continue
 
         current_price = current.get(ticker, {}).get("current_price") or 1.0
         shares = abs(diff_value) / current_price
@@ -75,19 +94,29 @@ def compute_rebalance_trades(
                 "reason":          "Overweight — trim to target",
             })
 
+    if USE_DRIFT_THRESHOLD and skipped_drift > 0:
+        logger.info(
+            f"[DRIFT] Skipped {skipped_drift} trades within "
+            f"{REBALANCE_DRIFT_THRESHOLD:.0%} of target (partial rebalance)"
+        )
+
     return buys, sells
 
 
-def _place_adaptive_order(ticker: str, action: str, shares: float) -> Dict:
+def _place_order(ticker: str, action: str, shares: float, strategy: str = "ADAPTIVE") -> Dict:
     """
-    Place a single Adaptive Market Order via ib_insync.
-
-    Adaptive algo fills near midpoint with minimal market impact.
+    Place an order via ib_insync using selected strategy.
+    
+    Strategies:
+      - "ADAPTIVE": IBALGO fills near midpoint with Urgent priority.
+      - "MARKET":   Standard IB market order.
     """
     try:
-        from ib_insync import Stock, Order
+        from ib_insync import Stock, Order, TagValue
     except ImportError:
         raise ImportError("ib_insync is not installed. Run: pip install ib_insync")
+
+    from backend.config import IBKR_ADAPTIVE_PRIORITY
 
     ib = get_ib()
     if not ib or not ib.isConnected():
@@ -97,15 +126,21 @@ def _place_adaptive_order(ticker: str, action: str, shares: float) -> Dict:
     ib.qualifyContracts(contract)
 
     order = Order()
-    order.action          = action            # "BUY" or "SELL"
-    order.orderType       = "MKT"
-    order.totalQuantity   = max(1, round(shares))
-    order.algoStrategy    = "Adaptive"
-    order.algoParams      = [("adaptivePriority", "Patient")]
-    order.tif             = "DAY"
+    order.action        = action            # "BUY" or "SELL"
+    order.totalQuantity = max(1, round(shares))
+    order.tif           = "DAY"
+
+    if strategy == "ADAPTIVE":
+        order.orderType    = "MKT"
+        order.algoStrategy = "Adaptive"
+        order.algoParams   = [TagValue("adaptivePriority", IBKR_ADAPTIVE_PRIORITY)]
+        strategy_label     = f"Adaptive({IBKR_ADAPTIVE_PRIORITY})"
+    else:
+        order.orderType    = "MKT"
+        strategy_label     = "Market"
 
     trade = ib.placeOrder(contract, order)
-    logger.info(f"[IBKR] {action} {order.totalQuantity} {ticker}  orderId={trade.order.orderId}")
+    logger.info(f"[IBKR] {action} {order.totalQuantity} {ticker} ({strategy_label})  orderId={trade.order.orderId}")
 
     return {
         "action":    action,
@@ -113,6 +148,7 @@ def _place_adaptive_order(ticker: str, action: str, shares: float) -> Dict:
         "shares":    order.totalQuantity,
         "order_id":  trade.order.orderId,
         "status":    "submitted",
+        "strategy":  strategy,
     }
 
 
@@ -124,22 +160,17 @@ def execute_rebalance(
 ) -> Dict:
     """
     Execute a full rebalance: sells first, then buys.
-
-    Args:
-        buys:          list of buy trade dicts from compute_rebalance_trades()
-        sells:         list of sell trade dicts from compute_rebalance_trades()
-        dry_run:       if True, log plan only — no orders placed
-        delay_seconds: pause between orders to avoid rate limits
-
-    Returns:
-        {sells: [...], buys: [...], errors: [...]}
+    
+    Implements fallback: if Adaptive order is rejected, try a standard Market order.
     """
+    from backend.config import IBKR_ORDER_STRATEGY
+
     results = {"sells": [], "buys": [], "errors": []}
 
     all_trades = [("SELL", t) for t in sells] + [("BUY", t) for t in buys]
 
     if dry_run or is_dry_run():
-        logger.info(f"[DRY RUN] Would execute {len(sells)} sells + {len(buys)} buys:")
+        logger.info(f"[DRY RUN] Would execute {len(sells)} sells + {len(buys)} buys (Strategy: {IBKR_ORDER_STRATEGY}):")
         for action, t in all_trades:
             logger.info(
                 f"  {action:4s}  {t['ticker']:<6s}  "
@@ -152,12 +183,13 @@ def execute_rebalance(
 
     # ── Live execution ─────────────────────────────────────────
     for action, trade in all_trades:
+        ticker = trade["ticker"]
+        shares = trade["shares"]
+        
         try:
-            result = _place_adaptive_order(
-                ticker=trade["ticker"],
-                action=action,
-                shares=trade["shares"],
-            )
+            # Attempt desired strategy
+            result = _place_order(ticker, action, shares, strategy=IBKR_ORDER_STRATEGY)
+            
             if action == "SELL":
                 results["sells"].append(result)
             else:
@@ -167,11 +199,26 @@ def execute_rebalance(
                 time.sleep(delay_seconds)
 
         except Exception as e:
-            logger.error(f"[IBKR] Order failed: {action} {trade['ticker']}: {e}")
+            error_msg = str(e)
+            
+            # Fallback logic: if Adaptive fails, try standard Market
+            if IBKR_ORDER_STRATEGY == "ADAPTIVE" and "rejected" in error_msg.lower():
+                logger.warning(f"[IBKR] Adaptive order rejected for {ticker}, falling back to MARKET order...")
+                try:
+                    fb_result = _place_order(ticker, action, shares, strategy="MARKET")
+                    if action == "SELL":
+                        results["sells"].append(fb_result)
+                    else:
+                        results["buys"].append(fb_result)
+                    continue 
+                except Exception as fb_e:
+                    error_msg = f"Adaptive failed, then Market fallback failed: {fb_e}"
+
+            logger.error(f"[IBKR] Order failed: {action} {ticker}: {error_msg}")
             results["errors"].append({
                 "action": action,
-                "ticker": trade["ticker"],
-                "error":  str(e),
+                "ticker": ticker,
+                "error":  error_msg,
             })
 
     return results

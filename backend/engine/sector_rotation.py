@@ -46,6 +46,7 @@ from backend.config import (
     BACKTEST_COMMISSION_PER_SHARE,
     REGIME_MA_DAYS,
     REGIME_MA_SHORT,
+    SECTOR_ROTATION_MAX_TECH_SECTORS,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ def select_top_sectors(
     momentum_scores: pd.Series,
     top_k: int = SECTOR_ROTATION_TOP_K,
     absolute_threshold: Optional[float] = None,
+    max_tech_sectors: Optional[int] = None,
 ) -> List[str]:
     """
     Return the top-K tickers (by momentum score, descending).
@@ -89,13 +91,35 @@ def select_top_sectors(
     If absolute_threshold is not None, only tickers with score > threshold
     qualify (Faber 2007 / Antonacci dual momentum). May return < top_k
     tickers if not enough qualify; may return [] if none qualify.
+
+    If max_tech_sectors is set (e.g. 1), limit the selection to at most that many
+    technology-related sector ETFs (XLK / Information Technology and XLC / Communication Services).
     """
     if momentum_scores is None:
         return []
     ranked = momentum_scores.dropna().sort_values(ascending=False)
     if absolute_threshold is not None:
         ranked = ranked[ranked > absolute_threshold]
-    return ranked.head(top_k).index.tolist()
+
+    if max_tech_sectors is not None:
+        tech_tickers = {"XLK", "XLC"}
+        selected = []
+        tech_count = 0
+        for ticker in ranked.index:
+            if len(selected) >= top_k:
+                break
+            is_tech = ticker in tech_tickers
+            if is_tech:
+                if tech_count < max_tech_sectors:
+                    selected.append(ticker)
+                    tech_count += 1
+                else:
+                    continue  # Skip this tech sector as we have hit the cap
+            else:
+                selected.append(ticker)
+        return selected
+    else:
+        return ranked.head(top_k).index.tolist()
 
 
 def build_target_weights(
@@ -217,6 +241,7 @@ def run_sector_backtest(
     trend_sma_days: int = SECTOR_TREND_SMA_DAYS,
     trend_dual_confirmation: bool = SECTOR_TREND_DUAL_CONFIRMATION,
     slippage_bps: float = BACKTEST_SLIPPAGE,
+    max_tech_sectors: int | None = SECTOR_ROTATION_MAX_TECH_SECTORS,
 ) -> Dict:
     """
     Run sector rotation backtest.
@@ -304,6 +329,7 @@ def run_sector_backtest(
             top = select_top_sectors(
                 mom_series, top_k=top_k,
                 absolute_threshold=abs_mom_threshold if apply_absolute_momentum else None,
+                max_tech_sectors=max_tech_sectors,
             )
 
             # ── Trend filter (binary cash / deploy master switch) ─────────
@@ -501,6 +527,7 @@ def run_sector_screener(
     as_of: Optional[pd.Timestamp] = None,
     top_k: int = SECTOR_ROTATION_TOP_K,
     use_live_tickers: bool = True,
+    max_tech_sectors: Optional[int] = SECTOR_ROTATION_MAX_TECH_SECTORS,
 ) -> Dict:
     """
     Compute today's top-K sectors for live trading.
@@ -510,6 +537,7 @@ def run_sector_screener(
         as_of:        date to score (default: last available trading day)
         top_k:        number of sectors to hold
         use_live_tickers: True → return UCITS tickers; False → return US proxies
+        max_tech_sectors: Optional cap on the number of tech sectors (XLK/XLC)
 
     Returns:
         {
@@ -536,6 +564,7 @@ def run_sector_screener(
     top_proxy_tickers = select_top_sectors(
         mom, top_k=top_k,
         absolute_threshold=SECTOR_ABS_MOM_THRESHOLD if USE_SECTOR_ABSOLUTE_MOMENTUM else None,
+        max_tech_sectors=max_tech_sectors,
     )
     # Map proxy tickers back to sector names
     proxy_to_sector = {v: k for k, v in SECTOR_BACKTEST_PROXIES.items()}

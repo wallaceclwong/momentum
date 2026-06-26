@@ -167,7 +167,9 @@ def _download_bulk_prices(tickers: List[str], start_date: str, end_date: str) ->
     from pathlib import Path
 
     cache_path = _get_cache_path()
-    buffer_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=200)).strftime("%Y-%m-%d")
+    # 400-day buffer so momentum lookbacks (252d) and residual-momentum
+    # regression (252d default) have full history at the first rebalance.
+    buffer_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=400)).strftime("%Y-%m-%d")
     need_start = pd.Timestamp(buffer_start)
     need_end   = pd.Timestamp(end_date)
 
@@ -406,15 +408,20 @@ def run_backtest(
             pit_sector_to_tickers = _gts(as_of=trade_date.to_pydatetime())
 
             # ── Build per-ticker DataFrames — min 252 days history filter ─
+            # Exception: SPY + sector ETFs are reference series for residual
+            # momentum regression — always include them regardless of history
+            # length so the regression can run as soon as enough data exists.
             MIN_HISTORY = 252
+            _REFERENCE_TICKERS = {"SPY", "^VIX"} | set(sector_etfs)
             ticker_dfs: Dict[str, pd.DataFrame] = {}
             for col in prices_to_date.columns:
                 series = prices_to_date[col].dropna()
-                if len(series) >= MIN_HISTORY:
+                if len(series) >= MIN_HISTORY or col in _REFERENCE_TICKERS:
                     ticker_dfs[col] = series.to_frame(name="Close")
 
             from ..engine.momentum import calculate_momentum_for_tickers as _calc
-            momentum_data = _calc(ticker_dfs)
+            # Phase 5A: pass sector map so residual momentum can strip factor beta
+            momentum_data = _calc(ticker_dfs, ticker_to_sector=ticker_to_sector)
 
             # ── Risk-parity sector weights (computed from ETFs to date) ──
             etf_prices_to_date = {
